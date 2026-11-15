@@ -372,6 +372,22 @@ APP_CONFIG = {
         # 环境变量 INJECT_ENABLE 可覆盖本值（1/true/yes/on 开，0/false/no/off 关）。
         "enabled": False,
     },
+    "external_text": {
+        # 外部 ASR 文本入口（B-37）总开关，默认关闭：局域网授权调用方（CCH 端截获
+        # 脚本 / PC 注入工具）把一段已被某 ASR 识别完成的文本当作一轮用户输入
+        # 送进对话管线，执行结果走既有出口（LX06 TTS / 工具 / HA）。
+        #   - 关闭时 POST /api/external/text 一律 503（code=external_text_disabled）；
+        #   - 开启还需 EXTERNAL_TEXT_ALLOW_CIDR 限源（默认空 = 拒绝，fail closed），
+        #     写类鉴权（BRIDGE_API_TOKENS Bearer）由 api_auth_middleware 统一把关。
+        # 环境变量 EXTERNAL_TEXT_ENABLE 可覆盖本值（1/true/yes/on 开，0/false/no/off 关）。
+        "enabled": False,
+        # 外部文本轮承载的后端（backend_registry 名；默认 = 生产主对话后端）。
+        "backend": "openai",
+        # 同一调用方（token label + TCP peer）两次外部轮的最小间隔（秒）：
+        # 双麦互听回环的缓解之一（外部轮自身播报期回灌由 busy 拒绝拦截）。
+        # 0 = 关闭限流（不建议）。
+        "min_interval": 10,
+    },
     "event_plane": {
         # 播放完成事件主源（blocking 播报的解锁判据）：
         #   context = 轮询 player_get_context.info.status（ticket 03 现状，默认）

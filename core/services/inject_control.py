@@ -62,8 +62,12 @@ _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
-def _flag(raw) -> bool | None:
-    """把 1/true/yes/on、0/false/no/off 解析为 bool；其它（含空）返回 None。"""
+def parse_flag(raw) -> bool | None:
+    """把 1/true/yes/on、0/false/no/off 解析为 bool；其它（含空）返回 None。
+
+    公开名（B-37 起）：同包纯逻辑模块（external_text 等）复用布尔解析，
+    不再跨模块导入 `_` 私有符号。
+    """
     if raw is None:
         return None
     value = str(raw).strip().lower()
@@ -74,6 +78,10 @@ def _flag(raw) -> bool | None:
     if value in _FALSE_VALUES:
         return False
     return None
+
+
+# 既有内部引用的别名（公开化为 parse_flag 后保留，避免一次改全引用面）
+_flag = parse_flag
 
 
 def _config_enabled(config) -> bool:

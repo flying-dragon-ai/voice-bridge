@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Coroutine
 from typing import Any
 
@@ -29,6 +30,19 @@ from core.services.inject_control import (
     peer_allowed,
     resolve_inject_data_auth,
     resolve_inject_enabled,
+)
+from core.services.external_text import (
+    EXTERNAL_TEXT_START_FAILED_CODE,
+    EXTERNAL_TEXT_BACKEND_UNKNOWN_CODE,
+    EXTERNAL_TEXT_BUSY_CODE,
+    EXTERNAL_TEXT_DISABLED_CODE,
+    EXTERNAL_TEXT_RATE_LIMITED_CODE,
+    EXTERNAL_TEXT_REFUSED_CODE,
+    ExternalTextThrottle,
+    resolve_external_text_backend,
+    resolve_external_text_cidrs,
+    resolve_external_text_enabled,
+    validate_external_text_payload,
 )
 from core.services.tts.doubao import DoubaoTTS
 from core.utils.config import ConfigManager
@@ -461,6 +475,8 @@ class APIServer:
         self.inject_enabled = resolve_inject_enabled(self.config)
         self.inject_relay = InjectRelay(enabled=self.inject_enabled)   # 注入流式中继（数据面）
         self._inject_expire_task: asyncio.Task | None = None
+        # 外部文本轮 per-caller 限流器（B-37）：键 = token label + TCP peer
+        self._external_text_throttle = ExternalTextThrottle()
         global _relay_singleton
         _relay_singleton = self.inject_relay
         self._setup_routes()
@@ -515,6 +531,9 @@ class APIServer:
             # 审计（ticket 12）：写类放行记 label（token 决定，不可伪造）+ peer。
             # 只读端点不记（高频轮询会刷屏）；health/read 本就免鉴权。
             if classify_route(path, request.method) == "write":
+                # label 暂存进 request：后续 handler（如 /api/external/text 的
+                # per-caller 限流键）取用——token 决定，不可伪造。
+                request["auth_label"] = decision.label
                 logger.info(
                     f"[APIServer] 放行 {request.method} {path} "
                     f"label={decision.label} caller={self._caller_tag(request)}"
@@ -556,6 +575,7 @@ class APIServer:
         self.app.router.add_post("/api/audio_input", self.handle_audio_input)  # T7.6 恢复通道
         self.app.router.add_post("/api/inject", self.handle_inject)  # ASR 注入窗口（闸门A + P2唤醒）
         self.app.router.add_get("/api/inject", self.handle_inject_status)
+        self.app.router.add_post("/api/external/text", self.handle_external_text)  # 外部 ASR 文本入口（B-37）
         self.app.router.add_post("/api/inject/stream", self.inject_relay.handle_upstream)  # PC 上行 PCM
         self.app.router.add_get("/api/inject/relay", self.inject_relay.handle_health)  # 中继观测
         self.app.router.add_get("/api/inject/text", self.inject_relay.handle_ws_text)  # 文本回传 WS
@@ -645,6 +665,20 @@ class APIServer:
                 "[APIServer] inject 模块未启用（inject.enabled=false）："
                 "不启动中继端口，注入控制/数据面端点返回 503"
             )
+        # B-37：外部文本入口的鉴权模式启动声明（「当前到底有没有鉴权」不靠猜；
+        # 本端点无只读探针，观测面 = 本日志行）
+        if resolve_external_text_enabled(self.config):
+            cidrs = resolve_external_text_cidrs()
+            mode = "refused" if cidrs.refused else f"{len(cidrs.networks)} networks"
+            logger.info(
+                f"[APIServer] external_text 模块已启用（限源={mode} "
+                f"backend={resolve_external_text_backend(self.config)}）"
+            )
+        else:
+            logger.info(
+                "[APIServer] external_text 模块未启用（external_text.enabled=false）："
+                "端点返回 503 code=external_text_disabled"
+            )
 
     async def stop(self):
         """Stop the HTTP server"""
@@ -656,15 +690,11 @@ class APIServer:
 
     # ============ Handlers ============
 
-    def _caller_tag(self, request: web.Request) -> str:
-        """返回调用方标识（用于审计“是谁让音箱说话”）。incident §5 建议 7。
+    @staticmethod
+    def _remote_peer(request: web.Request) -> str | None:
+        """原始 TCP peer（默认 IP 事实源；`X-Forwarded-For` 不在此读）。
 
-        **默认只认 TCP peer**（`request.remote`）——生产是 host 网络直连、无反向代理，
-        `X-Forwarded-For` / `X-Real-IP` 可被任意客户端伪造，默认信任等于审计失效。
-        仅在显式 `TRUST_PROXY=1`（部署在受控反代之后）时才读代理链头。
-        判定逻辑见 `core/services/caller.py`（纯函数，可单测）。
-
-        `request.remote` 缺失时回退 transport peer（兼容测试替身/非标准请求对象）。
+        `request.remote` 缺失时回退 transport peer（兼容测试替身/非标准请求）。
         """
         remote = getattr(request, "remote", None)
         if not remote:
@@ -672,8 +702,18 @@ class APIServer:
             peer = transport.get_extra_info("peername") if transport else None
             if peer:
                 remote = peer[0] if isinstance(peer, tuple) and peer else str(peer)
+        return remote
+
+    def _caller_tag(self, request: web.Request) -> str:
+        """返回调用方标识（用于审计“是谁让音箱说话”）。incident §5 建议 7。
+
+        **默认只认 TCP peer**（`request.remote`）——生产是 host 网络直连、无反向代理，
+        `X-Forwarded-For` / `X-Real-IP` 可被任意客户端伪造，默认信任等于审计失效。
+        仅在显式 `TRUST_PROXY=1`（部署在受控反代之后）时才读代理链头。
+        判定逻辑见 `core/services/caller.py`（纯函数，可单测）。
+        """
         return resolve_caller_tag(
-            remote,
+            self._remote_peer(request),
             getattr(request, "headers", None),
             trust_proxy=trust_proxy_enabled(),
         )
@@ -1331,6 +1371,190 @@ class APIServer:
                 "stats": dict(self.inject_relay.stats),
             },
         })
+
+    async def handle_external_text(self, request: web.Request) -> web.Response:
+        """
+        POST /api/external/text
+        外部 ASR 文本入口（B-37）：把一段已被某 ASR 识别完成的文本当作一轮
+        用户输入送进对话管线，执行结果走既有出口（LX06 TTS / 工具 / HA）。
+
+        闸门（fail closed）。**写类 Bearer 鉴权由 `api_auth_middleware` 先行**
+        （缺 token 401 / 错 token 403 / 未配置 503，均在进 handler 前拒绝）；
+        handler 内顺序判定：
+          1. 模块开关 `external_text.enabled`（env `EXTERNAL_TEXT_ENABLE` 覆盖）
+             —— 关闭一律 503 code=external_text_disabled；
+          2. 限源 `EXTERNAL_TEXT_ALLOW_CIDR`（默认空 = refused；按**原始 TCP
+             peer** 比对，`X-Forwarded-For` 默认不可信）—— 未配/非法/未命中
+             一律 503 code=external_text_refused；
+          3. 载荷校验（text 必填 ≤500 字符 / source ≤64 截断 / silent 严格解析）
+             —— 400；
+          4. 同调用方（token label + TCP peer）最小间隔限流 —— 429
+             code=external_text_rate_limited（双麦互听回环缓解）；
+          5. 后端登记检查（503 backend_unknown）+ 已有活跃会话 → 409
+             code=external_text_busy（串行拒绝，不顶替）→ 占位异常 503
+             code=external_text_start_failed。
+
+        请求体：
+            {"text": "...",           # 必填，≤500 字符
+             "source": "cch-screen",  # 可选调用方 id（仅进审计，可伪造——
+                                      #  鉴权/限流不依赖它）
+             "silent": false}         # 可选：只执行不播报（回复文本随响应返回）
+
+        Response:
+            非 silent：202 {"success": true, "accepted": true}（轮在后台执行，
+                       回复走 LX06 TTS）
+            silent：   200 {"success": true, "completed": true, "reply": "...",
+                       "outcome": "...", "turn": N}（等待本轮完成后返回）
+        """
+        caller = self._caller_tag(request)
+
+        # 1. 模块开关（fail closed）
+        if not resolve_external_text_enabled(self.config):
+            logger.info(
+                f"[APIServer] /api/external/text 拒绝 caller={caller}：模块未启用"
+            )
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": EXTERNAL_TEXT_DISABLED_CODE,
+                    "error": "外部文本入口未启用（external_text.enabled=false，"
+                    "或环境变量 EXTERNAL_TEXT_ENABLE=0）",
+                },
+                status=503,
+            )
+
+        # 2. 限源（fail closed：未配 / 非法 / 未命中一律拒；peer 用原始 TCP）
+        cidrs = resolve_external_text_cidrs()
+        peer_ip = self._remote_peer(request)
+        if cidrs.refused or not peer_allowed(peer_ip, cidrs.networks):
+            reason = cidrs.refused_reason or "源不在 EXTERNAL_TEXT_ALLOW_CIDR 白名单"
+            logger.warning(
+                f"[APIServer] /api/external/text 拒绝 caller={caller} peer={peer_ip}: {reason}"
+            )
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": EXTERNAL_TEXT_REFUSED_CODE,
+                    "error": f"限源拒绝：{reason}",
+                },
+                status=503,
+            )
+
+        # 3. 载荷校验（token 鉴权已在中间件完成）
+        try:
+            data = await request.json() if request.can_read_body else {}
+        except Exception:
+            return web.json_response(
+                {"success": False, "error": "请求体不是合法 JSON"}, status=400
+            )
+        payload, error = validate_external_text_payload(data)
+        if payload is None:
+            return web.json_response({"success": False, "error": error}, status=400)
+
+        # 4. per-caller 限流（回环缓解；键 = token label + TCP peer，均不可伪造）。
+        # 注：槽位在本步写入、先于 busy 判定——busy 409 的请求同样占用窗口
+        # （方向上加强回环缓解：语音会话刚结束的连续重试会被挡到窗口结束）。
+        try:
+            min_interval = float(
+                self.config.get_app_config("external_text.min_interval", 10) or 0
+            )
+        except (TypeError, ValueError):
+            min_interval = 10.0
+        label = request.get("auth_label", "") if hasattr(request, "get") else ""
+        throttle_key = f"{label or 'none'}@{peer_ip}"
+        if not self._external_text_throttle.try_acquire(
+            throttle_key, now=time.monotonic(), min_interval=min_interval
+        ):
+            logger.warning(
+                f"[APIServer] /api/external/text 限流 caller={caller} "
+                f"label={label or 'none'} peer={peer_ip} min_interval={min_interval}s"
+            )
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": EXTERNAL_TEXT_RATE_LIMITED_CODE,
+                    "error": f"同一调用方 {min_interval:.0f}s 内至多一轮",
+                },
+                status=429,
+            )
+
+        # 5. 后端登记检查 + 同步占位（原子段：busy 判定与注册之间无 await）
+        backend = resolve_external_text_backend(self.config)
+        from core.backend_registry import backend_registry
+
+        if backend_registry.get(backend) is None:
+            logger.error(
+                f"[APIServer] /api/external/text 后端未登记 backend={backend}"
+            )
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": EXTERNAL_TEXT_BACKEND_UNKNOWN_CODE,
+                    "error": f"配置的后端 {backend} 不在注册表",
+                },
+                status=503,
+            )
+        try:
+            controller = EventManager.begin_external_text_session(
+                backend,
+                text=payload.text,
+                source=payload.source,
+                silent=payload.silent,
+            )
+        except Exception as exc:
+            # 占位段异常（如控制器构造失败；KWS 已由 begin 内部补恢复）：
+            # 不裸 500，fail closed 给明确错误码。
+            logger.error(
+                f"[APIServer] /api/external/text 占位失败 backend={backend} "
+                f"caller={caller}: {type(exc).__name__}: {exc}"
+            )
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": EXTERNAL_TEXT_START_FAILED_CODE,
+                    "error": "会话占位失败（内部错误），已放弃本轮",
+                },
+                status=503,
+            )
+        if controller is None:
+            logger.info(
+                f"[APIServer] /api/external/text busy（已有活跃会话）caller={caller}"
+            )
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": EXTERNAL_TEXT_BUSY_CODE,
+                    "error": "已有活跃对话会话（串行拒绝，不顶替）；稍后重试",
+                },
+                status=409,
+            )
+        logger.info(
+            f"[APIServer] /api/external/text accept caller={caller} label={label or 'none'} "
+            f"backend={backend} source={payload.source or 'unknown'} "
+            f"len={len(payload.text)} silent={payload.silent}"
+        )
+
+        if payload.silent:
+            # 等待本轮完成、随响应返回回复文本（CCH 屏显场景）；无服务端
+            # 超时——LLM/播放各自有界，客户端超时自理（超时后轮继续执行）。
+            result = await EventManager.finish_external_text_session(backend, controller)
+            return web.json_response(
+                {
+                    "success": True,
+                    "completed": True,
+                    "reply": result.get("reply", ""),
+                    "outcome": result.get("outcome", ""),
+                    "turn": result.get("turn_id"),
+                }
+            )
+
+        # 非 silent：轮在后台执行（回复走 LX06 TTS）；202 即刻返回，
+        # 端到端延迟口径（≤5s）只覆盖「提交→开始应答」。
+        self._create_background_task(
+            EventManager.finish_external_text_session(backend, controller),
+            name="external-text-finish",
+        )
+        return web.json_response({"success": True, "accepted": True}, status=202)
 
     async def handle_livez(self, request: web.Request) -> web.Response:
         """GET /livez —— 进程存活（不看设备；不走 /api/* 鉴权）。"""

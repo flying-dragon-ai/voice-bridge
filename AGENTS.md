@@ -39,6 +39,7 @@ open-xiaoai-bridge/
 │   │   ├── auth.py                # 业务 API Bearer 鉴权（纯函数，失败关闭）
 │   │   ├── health.py              # /api/health 纯函数组装（内存态 + 可选设备探针）
 │   │   ├── inject_control.py      # PC 注入开关判定 + 原子开窗/回滚（纯逻辑）
+│   │   ├── external_text.py       # 外部 ASR 文本入口开关/限源/限流/载荷校验（B-37 纯逻辑；HTTP 适配在 api_server）
 │   │   ├── admin_api.py           # 后台面板 API（/admin 页面 + /api/admin/*）
 │   │   ├── managed_api.py         # 托管播放 HTTP/SSE（B-05）：/api/music/*，music-control 凭据 + target 约束，失败关闭
 │   │   ├── admin_static/index.html# 面板单页前端（零外部依赖）
@@ -219,6 +220,8 @@ OpenClaw 网关客户端，管理 WebSocket 连接、消息分发、自动重连
 小智唤醒会话状态机，协调 KWS → VAD → 小智/OpenClaw 的唤醒流程。
 
 - `wakeup(text, source)` → 处理唤醒（调用 `before_wakeup` 钩子，路由到 XiaoZhi 或 OpenClaw）
+- `begin_external_text_session()` / `finish_external_text_session()` → **外部文本轮（B-37）**：同步占位（busy 检查→kws.pause→构造→预置文本→注册，无 await 原子段）+ 统一收尾（摘除注册/点歌续播/KWS resume，经抽出的 `_run_controller_session` 单点）；绕开 `wakeup()`（无 before_wakeup 播报副作用），会话键复位口径与唤醒一致
+- `conversation_active()` → 是否有活跃（含启动中）会话（外部轮串行判据）
 - `wait_next_step(timeout)` → 异步等待状态变化（带待决状态缓冲）
 - `update_step(step, step_data)` → 更新步骤
 - 事件回调：`on_interrupt()`, `on_wakeup()`, `on_tts_start()`, `on_tts_end()`, `on_speech()`, `on_silence()`
@@ -495,6 +498,7 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/status` | GET | 获取设备状态 |
 | `/api/wakeup` | POST | 唤醒设备 |
 | `/api/interrupt` | POST | 中断播放 |
+| `/api/external/text` | POST | **外部 ASR 文本入口（B-37）**：`{"text","source","silent"}`，把一段已识别完成的文本当作一轮用户输入送进对话管线（`external_text.enabled` 默认关；`EXTERNAL_TEXT_ALLOW_CIDR` 限源默认空=拒绝；写类 token 鉴权 + per-caller 限流 + busy 串行拒绝）。非 silent 202 即返（回复走 LX06 TTS）；`silent=true` 等轮完成、回复文本随响应返回（CCH 屏显） |
 | `/api/health` | GET | 健康检查：默认返回录音帧龄/策略、播放事件面、注入状态；`?probe=1` 额外采集 mediaplayer 存活/内存/麦态/固件白名单字段（总超时 4s；会打设备 RPC，配置 `BRIDGE_API_TOKEN` 时须带 Bearer，未配置时 probe 503） |
 | `/api/tts/doubao` | POST | Doubao TTS 合成 |
 | `/api/music/sessions` | POST | 开托管会话（B-05；`MANAGED_TOKENS` 专用凭据 + target） |
@@ -932,4 +936,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**1110 tests OK (skipped=3)**（2026-11-02，含本轮 `test_kws_sherpa_config.py` +5：主路 score/threshold/max_active_paths 全来自配置）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020，命令路径首次起播失败可见停止 +2 = 1022，长播报质量门（§15 #10，§7.1.6）+4 = 1026，纯动作提示音（§1.5）+3 = 1029，对话内裸媒体命令提示音（stop/pause）+5 = 1034，六麦波束 fixed/DOA/契约 +9 = 1043（2026-10-31，`test_audio_beamform.py`），影子 KWS 文件发现/日志 +6 = 1049（2026-10-31，`test_kws_shadow.py`）；acfd529 时实测 1056（较上记 +7，未逐项归因）；影子命中留证 PCM / context 修正 / ch0 计数（`test_kws_shadow.py` 重构）+13 = 1069（2026-11-01）；停止聆听确认闸门（`test_commands.py`）+3 = 1072（`1d6d9e4`）；keywords.py 模型适配 +4 = 1076（2026-11-02，`1e53ecf`/`9a04981`，含显示名用例）；B-36 批次（pcm 后端 / 命令 payload 透传 / seek 走设备执行器 / 录音接收）累计 +29 = **1105**（未逐项归因）；KWS 主路参数配置化 `test_kws_sherpa_config.py` +5 = **1110 OK (skipped=3)**（2026-11-02）。⚠ 该累计数已被后续批次抬高且未逐项归因——**2026-11-04 本机实测 1266 OK (skipped=3)**（同树未含本票时 1252）：lx06-beamform-8ch 票 01 = `test_audio_beamform.py` 15→24（+9：8ch 参与通道、参考声道排除、坐标告警与反例、子集收窄与 ≥2 路边界）+ 新文件 `tests/test_xiaoai_audio_wiring.py` +5（标定注入、构建回落、健康字段）。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**1110 tests OK (skipped=3)**（2026-11-02，含本轮 `test_kws_sherpa_config.py` +5：主路 score/threshold/max_active_paths 全来自配置）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020，命令路径首次起播失败可见停止 +2 = 1022，长播报质量门（§15 #10，§7.1.6）+4 = 1026，纯动作提示音（§1.5）+3 = 1029，对话内裸媒体命令提示音（stop/pause）+5 = 1034，六麦波束 fixed/DOA/契约 +9 = 1043（2026-10-31，`test_audio_beamform.py`），影子 KWS 文件发现/日志 +6 = 1049（2026-10-31，`test_kws_shadow.py`）；acfd529 时实测 1056（较上记 +7，未逐项归因）；影子命中留证 PCM / context 修正 / ch0 计数（`test_kws_shadow.py` 重构）+13 = 1069（2026-11-01）；停止聆听确认闸门（`test_commands.py`）+3 = 1072（`1d6d9e4`）；keywords.py 模型适配 +4 = 1076（2026-11-02，`1e53ecf`/`9a04981`，含显示名用例）；B-36 批次（pcm 后端 / 命令 payload 透传 / seek 走设备执行器 / 录音接收）累计 +29 = **1105**（未逐项归因）；KWS 主路参数配置化 `test_kws_sherpa_config.py` +5 = **1110 OK (skipped=3)**（2026-11-02）。⚠ 该累计数已被后续批次抬高且未逐项归因——**2026-11-04 本机实测 1266 OK (skipped=3)**（同树未含本票时 1252）：lx06-beamform-8ch 票 01 = `test_audio_beamform.py` 15→24（+9：8ch 参与通道、参考声道排除、坐标告警与反例、子集收窄与 ≥2 路边界）+ 新文件 `tests/test_xiaoai_audio_wiring.py` +5（标定注入、构建回落、健康字段）。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。B-37 外部文本入口批（`test_external_text{,_turn,_api}.py`）+71 = **1337 OK (skipped=3)**（2026-11-16，施工前 HEAD `5d0f443`）。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

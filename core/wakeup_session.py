@@ -293,7 +293,7 @@ class WakeupSessionManager:
 
         通用实现：查注册表取控制器壳（收敛自旧版 _start_<name>_conversation
         三连抄）。会话独立于 XiaoZhi 会话状态机运行；KWS 在对话期间暂停，
-        结束（含被打断）后恢复。
+        结束（含被打断）后恢复（注册/收尾单点 = `_run_controller_session`）。
         """
         entry = backend_registry.get(name)
         if entry is None:
@@ -305,15 +305,34 @@ class WakeupSessionManager:
             kws.pause()
         try:
             controller = entry.load_controller()()
-            self._controllers[name] = controller
-            task = asyncio.create_task(controller.start())
-            self._tasks[name] = task
+        except Exception as exc:
+            # 构造失败（_run_controller_session 未接手）：日志 + KWS 补恢复
+            logger.error(
+                f"[Wakeup] {entry.display_name} conversation failed: {type(exc).__name__}: {exc}",
+                module="Wakeup",
+            )
+            if kws:
+                kws.resume()
+            return
+        await self._run_controller_session(name, controller, kws, entry.display_name)
+
+    async def _run_controller_session(self, name: str, controller, kws, display_name: str = ""):
+        """注册控制器并驱动到会话结束（注册/收尾单点，wakeup 与外部文本轮共用）。
+
+        finally 三件事与旧版逐条一致：摘除注册（`_controllers`/`_tasks`）、
+        点歌续播（幂等）、KWS resume（含 listen_disabled 尊重与流 reset）。
+        CancelledError（on_interrupt 打断）在此吞掉——收尾照常执行。
+        """
+        self._controllers[name] = controller
+        task = asyncio.create_task(controller.start())
+        self._tasks[name] = task
+        try:
             await task
         except asyncio.CancelledError:
             pass  # interrupted cleanly by on_interrupt
         except Exception as exc:
             logger.error(
-                f"[Wakeup] {entry.display_name} conversation failed: {type(exc).__name__}: {exc}",
+                f"[Wakeup] {display_name or name} conversation failed: {type(exc).__name__}: {exc}",
                 module="Wakeup",
             )
         finally:
@@ -328,6 +347,78 @@ class WakeupSessionManager:
                 logger.warning(f"[Wakeup] resume after conversation failed: {exc}")
             if kws:
                 kws.resume()
+
+    # ---- 外部文本轮（B-37）----
+
+    def conversation_active(self) -> bool:
+        """是否有活跃（含启动中）的连续对话会话（外部文本轮的串行判据）。
+
+        占用判定看注册表非空（含「已注册但 start 任务尚未首跑」的窗口），
+        不看 controller.is_active()——占位原子性依赖这一点。
+        """
+        if self._controllers:
+            return True
+        return self._xiaozhi_future is not None
+
+    def begin_external_text_session(
+        self,
+        name: str,
+        *,
+        text: str,
+        source: str = "",
+        silent: bool = False,
+    ):
+        """外部文本轮：同步占位并起动会话任务；返回控制器，busy/未知后端返回 None。
+
+        占位段（busy 检查 → kws.pause → 构造 → 注册）**必须保持同步无 await**：
+        单事件循环内，本方法从进入到注册完成不产生交错点，占位即原子
+        （并发 POST 的 busy 判定因此成立）。返回非 None 时，调用方必须以
+        `finish_external_text_session` 收尾（摘除注册 + 续播 + KWS resume）。
+
+        会话起动绕开 `wakeup()`（ⓒ：不跑 before_wakeup 人设开场白/唤词路由
+        播报）；会话键复位与每次唤醒口径一致（reset_session_keys）。
+        """
+        entry = backend_registry.get(name)
+        if entry is None:
+            logger.warning(f"[Wakeup] external text: unknown backend {name!r}")
+            return None
+        if self.conversation_active():
+            logger.info("[Wakeup] external text: busy（已有活跃会话），拒绝", module="Wakeup")
+            return None
+
+        backend_registry.reset_session_keys(self.config)
+        kws = get_kws()
+        if kws:
+            kws.pause()
+        try:
+            controller = entry.load_controller()()
+            controller.begin_external_turn(text, source=source, silent=silent)
+        except Exception:
+            # 构造失败：KWS 补恢复，不留会话暂停态
+            if kws:
+                kws.resume()
+            raise
+        self._controllers[name] = controller
+        self._tasks[name] = asyncio.create_task(controller.start())
+        logger.info(
+            f"[ExternalText] session start backend={name} caller={source or 'unknown'} "
+            f"len={len(text)} silent={bool(silent)}",
+            module="Wakeup",
+        )
+        return controller
+
+    async def finish_external_text_session(self, name: str, controller) -> dict:
+        """收尾外部文本轮（摘除注册 + 续播 + KWS resume），返回轮结果。
+
+        结果经控制器公开访问器 `external_result()` 取（`_run_external_turn`
+        finally 写入）；打断等未写入场景回落 `interrupted` 空回复。非 silent
+        调用方以 fire-and-forget 任务方式调用本方法（返回值被忽略）。
+        """
+        await self._run_controller_session(name, controller, get_kws())
+        result = controller.external_result() if hasattr(controller, "external_result") else None
+        if not isinstance(result, dict):
+            result = {"turn_id": None, "outcome": "interrupted", "reply": ""}
+        return result
 
     async def reset_all_sessions(self):
         """Reset all active sessions before starting a new one.

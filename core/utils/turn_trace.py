@@ -232,9 +232,13 @@ class TurnTrace:
         source: str = "",
         asr_chars: int | None = None,
         started_at: float | None = None,
+        caller: str = "",
     ) -> None:
         self.turn_id = int(turn_id)
         self.source = str(source or "")
+        # 外部调用方 id（B-37 外部文本轮；其他输入链路恒空）。
+        # 截断防滥用；只进 summary/JSONL（[TurnTrace] 日志行保持全数值口径）。
+        self.caller = str(caller or "")[:64]
         self.asr_chars = _int_or_missing(asr_chars) if asr_chars is not None else -1
         self.started_at = time.monotonic() if started_at is None else float(started_at)
         self._marks: dict[str, float] = {}
@@ -408,6 +412,7 @@ class TurnTrace:
         with self._lock:
             marks = dict(self._marks)
             asr_chars = self.asr_chars
+            caller = self.caller
             llm_chars = self.llm_chars
             tts_chars = self.tts_chars
             tool_rounds = self.tool_rounds
@@ -447,6 +452,7 @@ class TurnTrace:
         return {
             "turn": self.turn_id,
             "src": self.source or "unknown",
+            "caller": caller,
             "incomplete": 1 if incomplete else 0,
             "asr_chars": asr_chars,
             "llm_chars": llm_chars,
@@ -546,6 +552,7 @@ def _new_trace_locked(
     source: str,
     asr_chars: int | None = None,
     turn_id: int | None = None,
+    caller: str = "",
 ) -> TurnTrace:
     global _current, _turn_counter
     if turn_id is None:
@@ -555,7 +562,7 @@ def _new_trace_locked(
         # 传入号（pipeline 源）同样推进内部计数器——后续自增号不会与
         # 传入号重叠，两号源不产生相同的 turn=N。
         _turn_counter = max(_turn_counter, turn_id)
-    _current = TurnTrace(turn_id, source=source, asr_chars=asr_chars)
+    _current = TurnTrace(turn_id, source=source, asr_chars=asr_chars, caller=caller)
     return _current
 
 
@@ -584,11 +591,13 @@ def begin_turn(
     source: str = "xiaoai_asr",
     asr_chars: int | None = None,
     turn_id: int | None = None,
+    caller: str = "",
 ) -> TurnTrace | None:
     """开始新一轮；若上一轮未收尾，先按 incomplete 输出（每轮仍只有一条）。
 
     turn_id：对话循环传入 core.utils.pipeline 的轮次号，使埋点行与管线
     日志同号；缺省时内部自增（测试/非对话入口的兼容口径）。
+    caller：外部调用方 id（B-37 外部文本轮专用；其余链路留空）。
     """
     global _current
     try:
@@ -596,7 +605,7 @@ def begin_turn(
             return None
         with _LOCK:
             previous = _current
-            trace = _new_trace_locked(source, asr_chars, turn_id=turn_id)
+            trace = _new_trace_locked(source, asr_chars, turn_id=turn_id, caller=caller)
         if previous is not None:
             _emit(previous, incomplete=True)
         return trace

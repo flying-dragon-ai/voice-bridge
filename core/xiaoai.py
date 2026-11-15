@@ -567,6 +567,15 @@ class XiaoAI:
     # ---- 录音通道：native 调用的唯一包装（看门狗 expected 标志由这里维护）----
 
     @classmethod
+    def recording_expected(cls) -> bool:
+        """录音通道当前是否应持续（只读快照，无设备 RPC）。
+
+        B-37 外部文本轮的收尾恢复判据：外部轮 TTS 断录后据此决定是否
+        start_recording（「进入时在录且已被断录」才恢复，不越权开麦）。
+        """
+        return bool(cls._recording_expected and not cls._recording_stop_requested)
+
+    @classmethod
     async def start_recording(cls) -> bool:
         """恢复设备端录音；返回是否成功（异常不外抛，交给看门狗重试）。"""
         cls._recording_expected = True

@@ -108,6 +108,13 @@ class ExternalConversationController:
         # 发声接缝（B-29 步 2）：播放 API 只经 open() 产出的 session 暴露，
         # 「发声前必须物理断录」由结构强制而非注释纪律
         self.speaking_channel = SpeakingChannel(self)
+        # 外部文本轮（B-37）：API 层经 WakeupSessionManager.begin_external_text_session
+        # 预置后 start()；单轮语义——该轮结束即整个会话退出，不进聆听循环。
+        self._external_request: dict | None = None
+        # 本轮后端回复段（外部轮 reply 面板/审计用；播报与否按 silent 分流）
+        self._external_reply: list[str] = []
+        # 轮终结果（turn_id/outcome/reply），finish_external_text_session 消费
+        self._external_result: dict | None = None
 
     # ---- config helpers ----
 
@@ -145,6 +152,24 @@ class ExternalConversationController:
 
     def is_active(self) -> bool:
         return self.active
+
+    def begin_external_turn(self, text: str, *, source: str = "", silent: bool = False) -> None:
+        """预置外部文本轮（B-37）。必须在 start() 之前调用。
+
+        单轮语义：该轮结束即整个会话退出（`_conversation_loop` 外部分支），
+        无下一轮聆听；silent=True 时回复只收集不发声（CCH 屏显场景）。
+        """
+        self._external_request = {
+            "text": str(text or ""),
+            "source": str(source or ""),
+            "silent": bool(silent),
+        }
+        self._external_reply = []
+        self._external_result = None
+
+    @property
+    def _external_silent(self) -> bool:
+        return bool(self._external_request and self._external_request.get("silent"))
 
     async def start(self):
         """Enter OpenClaw conversation mode."""
@@ -197,7 +222,7 @@ class ExternalConversationController:
         if self._playback_token is not None:
             open_xiaoai_server.stop_tts_playback(self._playback_token)
             self._playback_token = None
-        if self.uses_xiaoai_asr():
+        if self.uses_xiaoai_asr() and self._external_request is None:
             speaker = get_speaker()
             if speaker and self._loop:
                 try:
@@ -216,6 +241,12 @@ class ExternalConversationController:
 
     async def _conversation_loop(self):
         """Run VAD -> ASR -> backend -> TTS turns until exit."""
+
+        # 外部文本轮（B-37）：不跑序前导（断录/notify/开录）——外部轮不聆听，
+        # 预置文本直接进轮模板，单轮后整个会话退出。
+        if self._external_request is not None:
+            await self._run_external_turn()
+            return
 
         # Mute mic → play notify → unmute.
         # _notify_sound() blocks for ~740ms (the beep duration), during which
@@ -273,6 +304,65 @@ class ExternalConversationController:
                 self._pipeline_turn = None
                 self._speech_end_at = None
                 conversation_pipeline.end_turn(outcome, turn=turn)
+
+    async def _run_external_turn(self):
+        """外部文本单轮（B-37）：预置文本进既有轮模板，轮终即会话退出。
+
+        spec 三待确认点的定案（`ws: .scratch/external-asr-entry/spec.md`）：
+          - ⓐ 不聆听：`_conversation_loop` 外部分支跳过序前导，
+            `_notify_and_resume_listening` 对外部轮 no-op（无下一轮）。
+            但**会话收尾按「进入时在录且已被本轮断录」恢复录音**——
+            本轮 TTS 经 speaking_channel 物理断录后若不恢复，KWS resume
+            后无帧失聪（看门狗 expected=false 不接管，AGENTS.md 录音通道节）。
+          - ⓑ silent 只压回复面（`_speak_response_segments` collect-only），
+            护栏交互（C/B 确认提示、无回复降级）照旧播报——护栏对本入口
+            的文本视同语音输入，一视同仁。
+          - ⓒ 会话起动绕开 `wakeup()`/before_wakeup（无开场白播报副作用），
+            由 `WakeupSessionManager.begin_external_text_session` 直入会话。
+        """
+        req = self._external_request or {}
+        was_recording = self._recording_expected()
+        turn = conversation_pipeline.begin_turn("external_text")
+        self._pipeline_turn = turn
+        outcome = "played"
+        try:
+            result = await self._run_one_turn()
+            # 单轮语义：continue 也结束会话（外部轮无下一轮）。
+            outcome = "played" if result == "continue" else str(result)
+        except TurnCancelledError as exc:
+            outcome = f"cancelled:{exc.checkpoint}"
+            logger.info(
+                f"turn={exc.turn_id} external turn silent exit at checkpoint={exc.checkpoint} "
+                f"reason={exc.reason}",
+                module=self.LOG_MODULE,
+            )
+        finally:
+            if outcome == "played" and turn is not None and turn.cancelled:
+                outcome = "cancelled"
+            self._pipeline_turn = None
+            conversation_pipeline.end_turn(outcome, turn=turn)
+            self._external_result = {
+                "turn_id": turn.turn_id if turn is not None else None,
+                "outcome": outcome,
+                "reply": "".join(self._external_reply),
+            }
+            if was_recording and not self._recording_expected():
+                # 本轮发声断录：恢复录音通道，KWS resume 后才有帧可听。
+                await self._start_recording()
+
+    @staticmethod
+    def _recording_expected() -> bool:
+        """录音通道当前是否应持续（XiaoAI 公开只读快照，外部轮收尾恢复判据）。"""
+        from core.xiaoai import XiaoAI
+
+        return XiaoAI.recording_expected()
+
+    def external_result(self) -> dict | None:
+        """外部轮结果（turn_id/outcome/reply）；轮未收尾或非外部轮时 None。
+
+        `finish_external_text_session` 经此取结果——不直访 `_external_result`。
+        """
+        return self._external_result
 
     async def _run_one_turn(self) -> str:
         """单轮固定编排（B-28 票 03 轮模板，收敛自双写的 _run_one_turn_with_*）：
@@ -431,6 +521,10 @@ class ExternalConversationController:
         在首段前闭掉；notify 阻塞 ~740ms（提示音时长）足够 TTS 回声衰减；
         开录后等静音确保残留回声/缓冲清空，VAD.resume() 已重置全部状态，
         语音检测从干净状态开始。"""
+        # B-37 外部轮：单轮语义，无下一轮聆听——提示音/开录/等静音全跳过，
+        # 录音通道由 _run_external_turn 收尾按需恢复。
+        if self._external_request is not None:
+            return
         await self._notify_sound()
         await self._start_recording()
         if not self.uses_xiaoai_asr():
@@ -449,6 +543,28 @@ class ExternalConversationController:
             ("continue", None) 本地 ASR 空结果（重试，不结束会话）
             ("error", None)   本地链路 VAD 不可用
         """
+        # 外部预置文本（B-37）：优先于两条 ASR 链路——外部轮不吃麦克风输入，
+        # 文本已由调用方（CCH 端截获 / PC 工具）识别完成。
+        if self._external_request is not None:
+            text = str(self._external_request.get("text") or "")
+            caller = str(self._external_request.get("source") or "")
+            turn = self._pipeline_turn
+            logger.info(
+                f"[ExternalText] turn={turn.turn_id if turn else '-'} "
+                f"caller={caller or 'unknown'} len={len(text)} "
+                f"silent={self._external_silent}",
+                module=self.LOG_MODULE,
+            )
+            trace = turn_trace.begin_turn(
+                "external_text",
+                asr_chars=len(text),
+                turn_id=turn.turn_id if turn else None,
+                caller=caller,
+            )
+            if trace is not None:
+                trace.mark("asr_final")
+            return "ok", text
+
         if self.uses_xiaoai_asr():
             text = await self._wait_for_xiaoai_asr_text()
             if text is None:
@@ -534,6 +650,10 @@ class ExternalConversationController:
         with_send_sound：本地链路在等首段期间播「咻」提示音（pump 已
         先行调度，时序与非流式等价）；原生 ASR 链路无提示音。
 
+        B-37 外部轮：`_external_silent` 时 collect-only——段只收集不发声
+        （不开 channel、不播咻、不断录），回复文本经 _external_reply 交给
+        端点响应；非 silent 外部轮照常走既有 TTS 出口。
+
         取消语义（打断两层机制不变）：段循环每个句段过 stream_segment
         检查点（取消即不再播剩余段、pump 被 cancel、aclose 关上游 SSE）；
         播放中的段由打断方 stop_tts_playback(令牌) 定向杀流，杀完后的
@@ -542,6 +662,7 @@ class ExternalConversationController:
         queue: asyncio.Queue = asyncio.Queue()
         done = object()
         generator = self.backend.stream_response_segments(text)
+        collect_only = self._external_silent
 
         # 入口复位（与 _run_one_turn 的轮首复位双保险）：工具置位发生在本
         # 方法内部（pump 驱动 LLM 期间），此处清的是上一轮可能的残留。
@@ -560,7 +681,7 @@ class ExternalConversationController:
         played: list[str] = []
         channel_ctx = None
         try:
-            if with_send_sound:
+            if with_send_sound and not collect_only:
                 # 「咻」在断录前播（既有设计）：保 LLM 等待期 KWS/打断可用。
                 await self._play_send_sound()
             first = True
@@ -570,8 +691,15 @@ class ExternalConversationController:
                 segment = await queue.get()
                 if segment is done:
                     break
+                # 外部轮回复收集（silent 与否都收——reply 是内容事实，
+                # 播报与否是出口策略）
+                if self._external_request is not None:
+                    self._external_reply.append(segment)
                 # 检查点（流循环内每个句段）：取消即停播剩余段，静默退出。
                 self._checkpoint(CHECKPOINT_STREAM_SEGMENT)
+                if collect_only:
+                    played.append(segment)
+                    continue
                 if first and not muted:
                     from core.tools.registry import reply_suppressed
 
