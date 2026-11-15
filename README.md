@@ -318,13 +318,14 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 | `POST` | `/api/wakeup`            | 唤醒小爱音箱       |
 | `POST` | `/api/interrupt`         | 打断当前播放       |
 | `GET`  | `/api/status`            | 获取播放状态       |
+| `POST` | `/api/external/text`     | 外部 ASR 文本入口（B-37）：已识别文本进对话管线，默认关闭 |
 | `GET`  | `/api/health`            | 健康检查         |
 
 ### 🔐 鉴权
 
 业务 API 与后台面板使用**两套独立 token**：
 
-- 配置 `BRIDGE_API_TOKEN` 后，写类端点（`/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/tts/doubao`）必须带 `Authorization: Bearer <BRIDGE_API_TOKEN>`：缺失/格式错误返回 401，token 不匹配返回 403。
+- 配置 `BRIDGE_API_TOKEN` 后，写类端点（`/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/external/text`、`/api/tts/doubao`）必须带 `Authorization: Bearer <BRIDGE_API_TOKEN>`：缺失/格式错误返回 401，token 不匹配返回 403。
 - **未配置 `BRIDGE_API_TOKEN` 时写类端点失败关闭（503 + 配置提示）**；`/api/health`、`/api/status`、`GET /api/inject`、`/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取（不返回凭证）。
 - 管理面板继续只用 `ADMIN_TOKEN`，与 `BRIDGE_API_TOKEN` 互不回退。
 - 日志只记录调用方与错误码，不打印 token 明文。

@@ -187,6 +187,20 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   容器内验证 `_gate_kws` 落点齐全（`_run_steps` / `api/play/{text,url,file}`）、`/api/audio_input` 恢复接口正常。
   旧镜像自动保留可回滚；旧 config.py 备份为 `config.py.bak-20260924104901`。
 
+### 外部 ASR 文本入口（可选，默认关闭）
+
+- **默认关闭**：`external_text.enabled=false` 且 `EXTERNAL_TEXT_ENABLE` 留空 ⇒
+  `POST /api/external/text` 一律 503 + `code=external_text_disabled`；主对话路径完全不受影响。
+- **开启三条件缺一不可**：`EXTERNAL_TEXT_ENABLE=1`（或 config.py `external_text.enabled=true`，需重启）
+  + `EXTERNAL_TEXT_ALLOW_CIDR` 限源（默认空 = refused；按原始 TCP peer 比对，XFF 不可信）
+  + `BRIDGE_API_TOKENS` Bearer（写类鉴权，既有中间件）。另有 per-caller 限流
+  （token label + peer，`external_text.min_interval` 默认 10s）与活跃会话 409 busy 串行拒绝。
+- **用途**（B-37）：CCH 端截获脚本 / PC 工具把一段已识别完成的文本当作一轮用户输入送进
+  对话管线，回复走既有出口；`silent=true` 只执行不播报、回复文本随响应返回（CCH 屏显）。
+  spec = `ws: .scratch/external-asr-entry/spec.md`（2026-11-16 已施工，bridge b64d22f）。
+  ⚠ 激活前须过双麦互听缓解 design review（CCH 计划 C-6）；`EXTERNAL_TEXT_ALLOW_CIDR` 建议配 CCH 设备 /32。
+- **回滚**：`enabled=false` 一行回退；env 置 0 或清空 CIDR 同样 fail closed。
+
 ### 延迟埋点 TurnTrace（可选，默认关闭）
 
 - **默认关闭**：`turn_trace.enabled=false` 且 `TURN_TRACE_ENABLED` 留空 ⇒ 零日志、零行为变化。

@@ -469,6 +469,18 @@ APP_CONFIG = {
         # 环境变量 INJECT_ENABLE 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
         "enabled": False,
     },
+    "external_text": {
+        # 外部 ASR 文本入口（B-37）总开关，默认关闭：POST /api/external/text 一律
+        # 503 code=external_text_disabled。开启三条件缺一不可：本开关 +
+        # EXTERNAL_TEXT_ALLOW_CIDR 限源（下方 backend）+ BRIDGE_API_TOKENS Bearer。
+        # 环境变量 EXTERNAL_TEXT_ENABLE 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
+        "enabled": False,
+        # 外部文本轮承载的后端（backend_registry 名；默认 = 生产主对话后端）
+        "backend": "openai",
+        # 同调用方（token label + TCP peer）两次外部轮最小间隔（秒）：双麦互听
+        # 回环缓解之一；0 = 关闭限流（不建议）
+        "min_interval": 10,
+    },
     "event_plane": {
         # 播放完成事件主源：context（轮询 player_get_context）/
         # client（playing 事件）/ native（设备原生 play_status_broadcast_event）。
