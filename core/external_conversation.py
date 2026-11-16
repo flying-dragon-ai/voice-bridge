@@ -386,6 +386,38 @@ class ExternalConversationController:
         # 小爱链路已在 consume 回调（事件线程）非抛式过一次，这里再兜底一次。
         self._checkpoint(CHECKPOINT_ASR_FINAL)
 
+        # B-37 补（C-6 执行面）：外部轮指令表路由。外部会话直入（spec ⓒ 绕开
+        # wakeup()/before_wakeup），DIRECT_COMMANDS 的 KWS 词表路由不在链上，
+        # 表命中文本会漏进 LLM 当聊天。此处对齐唤醒路径语义（router 的
+        # source=="kws" 分支）：resolve_command_key 命中即 run_steps 执行、
+        # 不发 LLM。仅外部轮生效——语音路径的表匹配仍在 route_before_wakeup。
+        if self._external_request is not None:
+            from core.commands.executor import run_steps
+            from core.commands.matching import resolve_command_key
+            from core.utils.config_loader import ensure_config_module_loaded
+
+            # 不用裸 sys.modules.get("config")：ConfigManager 的 loader 会以
+            # __file__ 校验为由整模块替换该条目，测试桩会被静默冲掉；
+            # ensure 语义 = 保证真实配置模块在位并返回它（与生产一致）。
+            config_mod = ensure_config_module_loaded()
+            direct_table = (getattr(config_mod, "DIRECT_COMMANDS", None) or {}) if config_mod else {}
+            aliases = getattr(config_mod, "COMMAND_ALIASES", None) if config_mod else None
+            steps_key = resolve_command_key(text, direct_table, aliases)
+            if steps_key is not None:
+                # 无 LLM/TTS 句段：TurnTrace 立即收尾为 incomplete（拦截轮口径，
+                # 同 confirmation intercept / media command）。
+                turn_trace.abandon_turn()
+                logger.info(
+                    f"[ExternalText] direct command hit: key={steps_key}",
+                    module=self.LOG_MODULE,
+                )
+                speaker = get_speaker()
+                if speaker is not None:
+                    # 步骤序列里的 str（TTS）仍走 announce 闸门照常发声——
+                    # silent 只压 LLM 回复面（spec ⓑ），指令表自身的播报语义不变。
+                    await run_steps(speaker, direct_table[steps_key])
+                return "exit"
+
         # C/B 级写操作应答拦截（P3 票 04）：在 exit 关键词之前——「取消」
         # 也是合法应答，不能先被退出关键词截胡。
         confirm_reply = await self._try_handle_confirmation(text)

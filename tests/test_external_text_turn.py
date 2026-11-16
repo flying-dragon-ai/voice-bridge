@@ -511,5 +511,94 @@ class TurnTraceCallerTest(unittest.TestCase):
             self.assertEqual(trace.summary()["caller"], "")
 
 
+class ExternalCommandRoutingTest(unittest.IsolatedAsyncioTestCase):
+    """外部轮 DIRECT_COMMANDS 路由（C-6 执行面）：表命中执行、不进 LLM。
+
+    外部会话直入（spec ⓒ 绕开 wakeup/before_wakeup），指令表匹配只能在
+    `_run_one_turn` 内补；语音路径语义不受影响（表匹配仍在 route_before_wakeup）。
+    表来源 = ensure_config_module_loaded()（真实 config 模块）——测试经
+    patch.object 换表（sys.modules 桩会被 loader 以 __file__ 校验冲掉）。
+    """
+
+    def setUp(self):
+        conversation_pipeline.reset_pipeline()
+        turn_trace.reset_turn_trace()
+
+    def _stubs(self, c):
+        c._checkpoint = lambda *a, **k: None
+
+    async def test_direct_command_hit_runs_steps_skips_llm(self):
+        import config as config_real
+
+        c = _controller({"text": "打开相册", "source": "cch-2b", "silent": True})
+        self._stubs(c)
+        fake_speaker = types.SimpleNamespace()
+        played: list[tuple[object, list]] = []
+
+        async def fake_run_steps(speaker, steps):
+            played.append((speaker, steps))
+
+        async def must_not_reach(*a, **k):
+            raise AssertionError("LLM 编排不应被执行")
+
+        c._try_handle_confirmation = must_not_reach
+        with mock.patch.object(config_real, "DIRECT_COMMANDS", {"打开相册": [ha_like_step]}, create=True), \
+             mock.patch("core.commands.executor.run_steps", fake_run_steps), \
+             mock.patch("core.external_conversation.get_speaker", return_value=fake_speaker):
+            result = await c._run_one_turn()
+        self.assertEqual(result, "exit")
+        self.assertEqual(played, [(fake_speaker, [ha_like_step])])
+
+    async def test_direct_command_miss_falls_through(self):
+        import config as config_real
+
+        c = _controller({"text": "今天天气怎么样", "source": "cch-2b", "silent": True})
+        self._stubs(c)
+        played: list[tuple[object, list]] = []
+
+        async def fake_run_steps(speaker, steps):
+            played.append((speaker, steps))
+
+        async def fell_through(*a, **k):
+            raise RuntimeError("fell-through marker")
+
+        c._try_handle_confirmation = fell_through
+        with mock.patch.object(config_real, "DIRECT_COMMANDS", {"打开相册": [ha_like_step]}, create=True), \
+             mock.patch("core.commands.executor.run_steps", fake_run_steps):
+            with self.assertRaises(RuntimeError):
+                await c._run_one_turn()
+        self.assertEqual(played, [])
+
+    async def test_voice_path_semantics_untouched(self):
+        """非外部轮（语音路径）不做表匹配——语义仍在 route_before_wakeup。"""
+        import config as config_real
+
+        c = _controller(None)
+        self._stubs(c)
+        played: list[tuple[object, list]] = []
+
+        async def fake_run_steps(speaker, steps):
+            played.append((speaker, steps))
+
+        async def fell_through(*a, **k):
+            raise RuntimeError("fell-through marker")
+
+        async def acquire_ok(text="打开相册"):
+            return ("ok", text)
+
+        c._acquire_user_text = acquire_ok
+        c.config = types.SimpleNamespace(get_app_config=lambda path, default=None: default)
+        c._try_handle_media_command = fell_through
+        with mock.patch.object(config_real, "DIRECT_COMMANDS", {"打开相册": [ha_like_step]}, create=True), \
+             mock.patch("core.commands.executor.run_steps", fake_run_steps):
+            with self.assertRaises(RuntimeError):
+                await c._run_one_turn()
+        self.assertEqual(played, [])
+
+
+def ha_like_step():
+    return None
+
+
 if __name__ == "__main__":
     unittest.main()

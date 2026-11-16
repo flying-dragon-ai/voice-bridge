@@ -104,6 +104,10 @@ DIRECT_COMMANDS = {
     "暂停播放": [ha_script("music_stop")],
     "先暂停一下": [ha_script("music_stop")],
     "停止播放音乐": [ha_script("music_stop")],
+    # --- CCH 屏端点（A4-a，C-6 执行面）：LX06 免唤醒与 CCH 2b 外部轮共用本表
+    # （外部轮路由 = core/external_conversation.py _run_one_turn 表命中执行）；
+    # HA script 写 input_text.cch_banner → 面板横幅轮询切页
+    "打开相册": [ha_script("cch_show_album")],
     "开启高保真": ["正在准备客厅音响", ha_script("hifi_mode")],
 }
 
@@ -295,6 +299,8 @@ APP_CONFIG = {
             "开启高保真",
             # --- 音乐生态点歌触发（V2，与 PERSONAS 条目配套；纯中文 >=4 字）---
             "我要点歌", "帮我点歌",
+            # --- CCH 屏端点（A4-a）：与 DIRECT_COMMANDS「打开相册」同步（audit 对账）---
+            "打开相册",
         ],
         "timeout": 20,
         "before_wakeup": before_wakeup,
@@ -474,7 +480,9 @@ APP_CONFIG = {
         # 503 code=external_text_disabled。开启三条件缺一不可：本开关 +
         # EXTERNAL_TEXT_ALLOW_CIDR 限源（下方 backend）+ BRIDGE_API_TOKENS Bearer。
         # 环境变量 EXTERNAL_TEXT_ENABLE 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
-        "enabled": False,
+        # 2026-11-17 C-6 执行面开启：调用方 = NAS cch-capture 容器（2b 截获长流），
+        # 限源见 compose EXTERNAL_TEXT_ALLOW_CIDR；回滚 = 本行改 False。
+        "enabled": True,
         # 外部文本轮承载的后端（backend_registry 名；默认 = 生产主对话后端）
         "backend": "openai",
         # 同调用方（token label + TCP peer）两次外部轮最小间隔（秒）：双麦互听
