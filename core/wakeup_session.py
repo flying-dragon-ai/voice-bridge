@@ -316,16 +316,31 @@ class WakeupSessionManager:
             return
         await self._run_controller_session(name, controller, kws, entry.display_name)
 
-    async def _run_controller_session(self, name: str, controller, kws, display_name: str = ""):
+    async def _run_controller_session(
+        self,
+        name: str,
+        controller,
+        kws,
+        display_name: str = "",
+        existing_task: "asyncio.Task | None" = None,
+    ):
         """注册控制器并驱动到会话结束（注册/收尾单点，wakeup 与外部文本轮共用）。
 
+        `existing_task`：外部文本轮（B-37 silent 等待路径）的会话任务已由
+        `begin_external_text_session` 起好——传入它只等待，**不再新建
+        `controller.start()` 任务**。曾在此为同一控制器二次 start()，触发
+        「Already active, ignoring start()」并在轮未完成时就读收尾
+        （silent 响应恒 interrupted + 空 reply，且 KWS resume 抢跑）。
         finally 三件事与旧版逐条一致：摘除注册（`_controllers`/`_tasks`）、
         点歌续播（幂等）、KWS resume（含 listen_disabled 尊重与流 reset）。
         CancelledError（on_interrupt 打断）在此吞掉——收尾照常执行。
         """
         self._controllers[name] = controller
-        task = asyncio.create_task(controller.start())
-        self._tasks[name] = task
+        if existing_task is not None:
+            task = existing_task
+        else:
+            task = asyncio.create_task(controller.start())
+            self._tasks[name] = task
         try:
             await task
         except asyncio.CancelledError:
@@ -414,7 +429,11 @@ class WakeupSessionManager:
         finally 写入）；打断等未写入场景回落 `interrupted` 空回复。非 silent
         调用方以 fire-and-forget 任务方式调用本方法（返回值被忽略）。
         """
-        await self._run_controller_session(name, controller, get_kws())
+        # 等待已起好的会话任务（begin_external_text_session 注册的），不二次 start
+        existing_task = self._tasks.get(name)
+        await self._run_controller_session(
+            name, controller, get_kws(), existing_task=existing_task
+        )
         result = controller.external_result() if hasattr(controller, "external_result") else None
         if not isinstance(result, dict):
             result = {"turn_id": None, "outcome": "interrupted", "reply": ""}

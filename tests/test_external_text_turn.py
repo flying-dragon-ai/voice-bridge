@@ -448,6 +448,36 @@ class WakeupSessionClaimTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kws.resume_calls, 1)
         fake_resume.assert_awaited_once()
 
+    async def test_finish_does_not_restart_controller(self):
+        """回归（C-6 冒烟发现）：silent 等待路径曾对同一控制器二次 start()——
+        原轮未完成即读结果（恒 interrupted + 空 reply），且 KWS resume 等尾段
+        抢跑。finish 必须只等待 begin 起好的任务，start 全程恰好一次。"""
+        mgr = self._manager()
+        kws = FakeKws()
+        start_calls: list[int] = []
+
+        class CountingController(FakeController):
+            async def start(self):
+                start_calls.append(1)
+                self._external_result = {"turn_id": 1, "outcome": "exit", "reply": ""}
+                await asyncio.sleep(0)
+
+        entry = FakeEntry()
+        entry.load_controller = lambda: CountingController
+        with mock.patch(
+            "core.wakeup_session.backend_registry",
+            mock.MagicMock(get=lambda name: entry),
+        ), mock.patch("core.wakeup_session.get_kws", return_value=kws):
+            controller = mgr.begin_external_text_session("openai", text="hi")
+            with mock.patch(
+                "core.tools.song_request.resume_after_wakeup",
+                new=mock.AsyncMock(),
+            ):
+                result = await mgr.finish_external_text_session("openai", controller)
+        self.assertEqual(len(start_calls), 1)
+        self.assertEqual(result["outcome"], "exit")
+        self.assertEqual(result["turn_id"], 1)
+
     async def test_finish_result_fallback_when_interrupted(self):
         mgr = self._manager()
         kws = FakeKws()
