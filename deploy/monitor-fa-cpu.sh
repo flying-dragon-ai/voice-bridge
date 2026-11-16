@@ -1,6 +1,9 @@
 #!/bin/sh
 # monitor-fa-cpu.sh — FA/CPU 监控窗口数据采集（music-far 票 02 部署后观察窗口）
 # 用法：NAS 上 `sh monitor-fa-cpu.sh`（办公室机经 WSL ssh 调用，见 deploy-vad-endpoint 纪要）
+# ⚠ 只打 stdout，自身不落盘。要留历史必须显式重定向，否则窗口到期无数据可判
+#   （2026-11-16 复盘：11-03~11-10 窗口因未落盘，CPU/errors 历史全缺）：
+#   cron 9:30/21:30 → `sh /volume2/docker/open-xiaoai-bridge/monitor-fa-cpu.sh >> /volume2/docker/open-xiaoai-bridge/data/monitor/fa-cpu.log 2>&1`
 # 口径：shadow_only_hits = 当日影子 JSONL 中 hits 非空的记录数（含家人真声被主路
 #       漏检的影子命中——票 08 前的代理指标，非纯误触发）；「停止聆听」单独点名，
 #       任何非 0 即高危（误触会静默关闭整套唤醒）。
