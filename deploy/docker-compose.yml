@@ -24,6 +24,8 @@ services:
       # 9093 数据面鉴权（票 12）：启用注入后未配 CIDR 且未显式 INJECT_ALLOW_ANON=1 ⇒ 拒绝监听 9093
       - INJECT_ALLOW_CIDR=${INJECT_ALLOW_CIDR:-}
       - INJECT_ALLOW_ANON=${INJECT_ALLOW_ANON:-}
+      # 外部 ASR 文本入口（B-37，可选）：限源 CIDR，逗号分隔；未配置且开关开启 ⇒ 拒绝监听（fail closed）
+      - EXTERNAL_TEXT_ALLOW_CIDR=${EXTERNAL_TEXT_ALLOW_CIDR:-}
       # 每轮延迟埋点（可选）：留空=关闭；1/true/yes/on=开启（每轮一条 [TurnTrace] 数值行）
       - TURN_TRACE_ENABLED=${TURN_TRACE_ENABLED:-}
       # 面板「外部服务」探测列表（JSON 数组，可选）；纯状态监控，与对话后端无关，留空不展示
