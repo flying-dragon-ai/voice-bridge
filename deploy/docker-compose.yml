@@ -1,6 +1,6 @@
 services:
   open-xiaoai-bridge:
-    image: open-xiaoai-bridge:home      # 路径A：镜像由 WSL 侧 docker build -t :home → save tar → scp → NAS docker load 提供；compose 仅引用,不在此构建
+    image: open-xiaoai-bridge:cch-voice-20261119  # 路径A：WSL build -t 本 tag → save | ssh docker load；回滚改回 :home（旧镜像 NAS 保留）
     container_name: open-xiaoai-bridge
     restart: unless-stopped
     # host 网络：4399/9092 直接监听群晖宿主，音箱与 HA 均可直达，无需端口映射
@@ -38,6 +38,12 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - HA_TOKEN=${HA_TOKEN}
       - HA_BASE_URL=${HA_BASE_URL:-http://10.10.10.2:8123}
+      # CCH 投送鉴权（T2 ticket 08）：cch-proxy /cch/cast 的 PANEL_TOKEN。
+      # 值与 cch-proxy 同源（从 cch-proxy/.env 复制），不入库；缺失时 CCH 投送明确失败。
+      - PANEL_TOKEN=${PANEL_TOKEN:-}
+      # Songloft 管理口令（CCH 投送走 prepare 票据链）；值与 songloft/.env 同源，不入库。
+      # 修复：此前 .env 有值但 compose 未注入 → 容器内为空 → cch_cast 报 SONGLOFT_PASSWORD not configured。
+      - SONGLOFT_PASSWORD=${SONGLOFT_PASSWORD:-}
     volumes:
       - ./config.py:/app/config.py        # 热重载：改完约 1 秒生效
       - ./models:/app/core/models         # VAD + KWS 模型（xiaoai_asr 模式不需要 ASR 大模型）

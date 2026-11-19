@@ -91,6 +91,37 @@ class CchCastChannelTest(unittest.IsolatedAsyncioTestCase):
         finally:
             cch_cast.panel_token = orig_token
 
+    async def test_revoke_502_is_ticket_revoked(self):
+        """songloft: bff.Execute 先撤票、forwardCommand 后才 502 —— 502 视为撤票成功。"""
+        import core.music.song_bridge as sb
+
+        orig_token = sb._songloft_token
+        orig_cfg = sb._songloft_cfg
+        bodies = []
+
+        async def fake_token(base, http):
+            return "jwt"
+
+        async def revoke_handler(req):
+            bodies.append(await req.json())
+            return web.json_response({"error": "bridge session not established"}, status=502)
+
+        app = web.Application()
+        app.router.add_post("/api/v1/managed/command", revoke_handler)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            base = str(client.make_url("")).rstrip("/")
+            sb._songloft_token = fake_token
+            sb._songloft_cfg = lambda k, d=None: base if k == "songloft_base" else d
+            ok = await cch_cast.revoke("bridge-cch", 1, "e1")
+            self.assertTrue(ok, "502 should count as ticket revoked")
+            self.assertEqual(bodies[0]["name"], "stop")
+        finally:
+            sb._songloft_token = orig_token
+            sb._songloft_cfg = orig_cfg
+            await client.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -130,6 +130,13 @@ async def revoke(session: str, epoch: int, entry: str) -> bool:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         body = {"name": "stop", "session": session, "epoch": epoch, "entry": entry}
         async with http.post(f"{base}/api/v1/managed/command", json=body, headers=headers) as resp:
-            ok = 200 <= resp.status < 300
-            logger.info(f"[CchCast] revoke entry={entry} http={resp.status}", module="CchCast")
+            # songloft Execute 顺序：bff.Execute(stop→RevokeEntry 撤票) 在前，
+            # forwardCommand(通知 bridge 托管会话) 在后。CCH 投送无桥托管会话 ⇒
+            # 转发失败返 502，但票据已撤。502 因此视为"撤票已生效"的次生错误。
+            ok = (200 <= resp.status < 300) or resp.status == 502
+            logger.info(
+                f"[CchCast] revoke entry={entry} http={resp.status} ok={ok}"
+                + (" (502: ticket revoked, bridge forward failed)" if resp.status == 502 else ""),
+                module="CchCast",
+            )
             return ok
