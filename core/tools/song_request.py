@@ -258,8 +258,81 @@ _cch_state = {"entry": 0, "items": [], "session": _CCH_SESSION}
 
 
 async def _run_cch(action: str, args: dict) -> str:
-    from core.music.cch_cast import cast, cast_enabled, resolve_ticket_url, revoke
+    from core.music.cch_cast import (
+        build_render_data,
+        cast,
+        cast_enabled,
+        cast_native,
+        cast_native_simple,
+        kwqq_meta,
+        np_enabled,
+        resolve_ticket_url,
+        revoke,
+    )
     from core.tools.registry import suppress_reply
+
+    np_on = np_enabled()
+
+    # D 方向 kwqq 点播链（票 15/17，2026-11-20）：票据 URL + kwqq 元数据 → renderData
+    # → 9102 /cmd COMMAND 7（桥 v0.4.4 内 stop→push→重连→play，原厂内核出声）。
+    # 闸门 cch_np_enabled 默认 False，部署窗口由用户打开。
+    if np_on:
+        if action in ("pause", "resume", "next", "stop"):
+            if action == "pause":
+                ok, detail = await cast_native_simple(3)
+                suppress_reply()
+                return "已暂停 CCH 播放" if ok else f"CCH 暂停失败：{detail}"
+            if action == "resume":
+                ok, detail = await cast_native_simple(2)
+                suppress_reply()
+                return "已恢复 CCH 播放" if ok else f"CCH 恢复失败：{detail}"
+            if action == "next":
+                ok, detail = await cast_native_simple(8)
+                suppress_reply()
+                return "已切换 CCH 曲目" if ok else f"CCH 切歌失败：{detail}"
+            # stop：撤票据 + pause 收尾（原厂 DIRECT_STOP 语义无外部通道，pause 可靠）
+            cur = _cch_state.get("items") or []
+            entry = cur[_cch_state["entry"]].get("id", "") if cur else ""
+            try:
+                await revoke(_CCH_SESSION, _CCH_EPOCH, entry)
+            except Exception as exc:  # noqa: BLE001 - 撤票失败不阻塞响应
+                logger.warning(f"[SongRequest] cch revoke err: {type(exc).__name__}")
+            await cast_native_simple(3)
+            _cch_state.update({"entry": 0, "items": []})
+            suppress_reply()
+            return "已停止 CCH 播放"
+        if action == "prev":
+            # 桥 v0.4.4 未映射 skipToPrevious（facts §2.36 命令表无 prev 号）
+            suppress_reply()
+            return "CCH 暂不支持上一首"
+        # play / album：搜歌 → songloft prepare → renderData → 9102 /cmd
+        query = str(args.get("query") or "").strip()
+        items = await _managed_collect(
+            query, args.get("source"),
+            artist=str(args.get("artist") or "").strip(),
+            album=(action == "album"),
+        )
+        if not items:
+            return f"没有找到能播放的曲目《{query}》"
+        item = items[0]
+        ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
+               "extra": item.get("extra") or {}}
+        entry = str(item.get("id") or "cch-1")
+        try:
+            ticket_url = await resolve_ticket_url(
+                ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
+            meta = await kwqq_meta(ref["id"])
+            render_data = build_render_data(ticket_url, item, meta)
+            ok, detail = await cast_native(render_data)
+        except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
+            logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
+            return f"CCH 点播失败：{type(exc).__name__}"
+        if not ok:
+            return f"CCH 点播失败（9102 /cmd：{detail}）"
+        _cch_state.update({"entry": 0, "items": items[:1]})
+        suppress_reply()   # kwqq 源已起播：本轮收尾 TTS 不得顶掉它
+        name = str(render_data.get("audioName") or "歌曲")
+        return f"已在 CCH 上为你播放《{name}》"
 
     # CCH 主动投送默认关闭（票 16/17 的 D 方向裁决）：原厂 = 唯一播放器，bridge = 控制/状态端。
     # 关闭时**不出声、不投送、也不谎报动作**——原厂云链已经在处理这条语音请求，

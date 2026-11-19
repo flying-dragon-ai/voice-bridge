@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from urllib.parse import urlencode
 
 from core.utils.logger import logger
@@ -159,3 +160,124 @@ async def revoke(session: str, epoch: int, entry: str) -> bool:
                 module="CchCast",
             )
             return ok
+
+
+# ---- D 方向点播生产链（票 15/17，2026-11-20）：songloft 票据 → renderData(28 字段)
+#      → cch-tts :9102 POST /cmd COMMAND 7（桥 v0.4.4 内 stop→push→重连→play）。
+#      旧 /cch/cast 投桥第二播放器链保留在上文（回滚用），默认关闭（cast_enabled=False）。
+
+def np_enabled() -> bool:
+    """D 方向 kwqq 点播总开关（cch_np_enabled，默认 False——部署窗口由用户打开）。
+
+    True 时 song_request target=cch 走「票据 URL + kwqq 元数据 → renderData →
+    9102 /cmd COMMAND 7」生产链；False 时维持票 16/17 的关闭语义（原厂云链自行处理）。
+    """
+    val = _cfg("cch_np_enabled", False)
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
+def tts_base() -> str:
+    """cch-tts :9102 基址（capture 容器 host 网络）。"""
+    return str(_cfg("cch_tts_base", "http://10.10.10.2:9102")).rstrip("/")
+
+
+def tts_token() -> str:
+    """tts_http 的 Bearer（SPEAK_TOKEN 或 BRIDGE_TOKEN 同源）。"""
+    import os
+
+    val = str(_cfg("cch_tts_token", "") or "")
+    return val or os.environ.get("BRIDGE_TOKEN", "")
+
+
+async def kwqq_meta(song_id: str) -> dict:
+    """kwqq-api 曲目元数据（envelope 契约）。失败返回空 dict（renderData 退化用 id）。"""
+    import aiohttp
+
+    base = str(_cfg("api_base", "http://10.10.10.2:3003")).rstrip("/")
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(
+                f"{base}/kuwo/song/info", params={"id": song_id},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return {}
+                body = await resp.json()
+        if isinstance(body, dict) and body.get("code") == 200:
+            return body.get("data") or {}
+        return {}
+    except Exception as exc:  # noqa: BLE001 —— 元数据失败不阻塞点播
+        logger.warning(f"[CchCast] kwqq_meta({song_id}) err: {type(exc).__name__}", module="CchCast")
+        return {}
+
+
+def build_render_data(ticket_url: str, item: dict, meta: dict) -> dict:
+    """构造原厂 MusicService parseIntent 的 renderData（28 字段，facts §2.34 已验字段集）。
+
+    item = song_request 搜索项（name/artist/album/cover/source/id）；
+    meta = kwqq_meta() 载荷（name/singer/album/cover/duration 优先级更高）。
+    audioUrl 只进 short-lifetime 票据 URL（facts §2.34：端侧零凭证）。
+    """
+    name = str(meta.get("name") or item.get("name") or "歌曲")
+    singer = str(meta.get("singer") or item.get("artist") or "")
+    album = str(meta.get("album") or item.get("album") or "")
+    cover = str(meta.get("cover") or item.get("cover") or "")
+    duration = int(meta.get("duration") or item.get("duration") or 0) or 0
+    sid = str(meta.get("id") or item.get("id") or "")
+    audio_ext = json.dumps({
+        "audioAnchor": singer, "audioType": "music", "audioSource": "KWQQ",
+        "EnableNetDX": "true", "identifyStatus": 0, "playSpeedStatus": 0,
+        "request_id": f"bridge-{sid or 'np'}",
+    }, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "climaxEnd": 0, "audioId": sid, "audioSource": "KWQQ",
+        "pageSize": 30, "playFrom": "bridge.np.1", "source": "KWQQ",
+        "playlistOnly": False, "playMode": "Normal",
+        "cover": {"img": cover}, "defaultPlayOrder": 0,
+        "totalEpisode": 0, "audioUrl": ticket_url, "appId": "200",
+        "audioAlbum": album, "rawId": sid, "soundQuality": "高音质",
+        "audioImageUrl": cover, "copyRight": 0,
+        "itemRawId": sid, "audioUid": sid, "itemId": sid,
+        "toast": "", "audioName": name, "collect": False, "template": "",
+        "albumName": album, "audioExt": audio_ext,
+        "requestType": "create", "itemType": "music", "sourceLogoColor": "",
+        "audioLength": duration,
+    }
+
+
+async def cast_native(render_data: dict) -> tuple[bool, str]:
+    """POST 9102 /cmd COMMAND 7（Bearer）。返回 (ok, detail)——ok = HTTP 2xx，
+    生效与否看设备侧 observable（CchBridgeMeta/audio_flinger），调用方负责回读。"""
+    import aiohttp
+
+    token = tts_token()
+    if not token:
+        logger.warning("[CchCast] tts token not configured (BRIDGE_TOKEN)", module="CchCast")
+        return False, "tts token not configured"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {"command": 7, "extras": {"renderData": json.dumps(render_data, ensure_ascii=False)}}
+    async with aiohttp.ClientSession() as http:
+        async with http.post(f"{tts_base()}/cmd", json=body, headers=headers) as resp:
+            ok = 200 <= resp.status < 300
+            logger.info(f"[CchCast] /cmd c=7 http={resp.status} ok={ok}", module="CchCast")
+            return ok, f"http {resp.status}"
+
+
+async def cast_native_simple(command: int) -> tuple[bool, str]:
+    """播控转发（COMMAND 2/3/8）与收藏（9）经 9102 /cmd。"""
+    import aiohttp
+
+    if command not in (2, 3, 6, 8, 9):
+        return False, "command not allowed"
+    token = tts_token()
+    if not token:
+        return False, "tts token not configured"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {"command": command, "extras": {}}
+    async with aiohttp.ClientSession() as http:
+        async with http.post(f"{tts_base()}/cmd", json=body, headers=headers) as resp:
+            ok = 200 <= resp.status < 300
+            logger.info(f"[CchCast] /cmd c={command} http={resp.status} ok={ok}", module="CchCast")
+            return ok, f"http {resp.status}"
