@@ -38,6 +38,25 @@ def cch_cast_url() -> str:
     return str(_cfg("cch_cast_url", "http://10.10.10.2:18080/cch/cast")).rstrip("/")
 
 
+def cast_enabled() -> bool:
+    """CCH 主动投送总开关，**默认 False**（票 14 → 16/17 的 D 方向裁决）。
+
+    关闭原因（真机实证）：
+    - 真人语音下原厂 AGMC 云链与桥链**并发**，桥链 8/8 次在拿到窗口焦点 81–190 ms
+      内被交回（`ws: docs/devices/AliGenie/cch-tg-z02-facts.md` §2.27）；
+    - 更严重的是桥的 `BridgeReceiver` MediaPlayer 是**独立第二播放器**，原厂暂停后
+      它仍在出声（§2.30 实测 `media.audio_flinger` track 表 Client=com.cch.bridge Active=yes），
+      且每次起播泄漏一条音频焦点监听器（累积 17 条）。
+
+    ⇒ D 方向 = 原厂负责出声，bridge 只做控制/状态；投送仅保留代码与日志，默认不执行。
+    打开此开关即回滚到 v0.2.0 行为（也须同时回装播放版桥 APK，见 `deploy/cch-music-bridge/README.md`）。
+    """
+    val = _cfg("cch_cast_enabled", False)
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
 def panel_token() -> str:
     """cch-proxy 的 PANEL_TOKEN（env 回落，不入库）。"""
     import os

@@ -249,6 +249,10 @@ APP_CONFIG = {
         "songloft_user": "admin",
         # songloft_password 缺省回落环境变量 SONGLOFT_PASSWORD（NAS compose 注入，不入库）
         "songloft_password": "",
+        # CCH 主动投送总开关，默认关（票 16/17 的 D 方向裁决）：原厂 = 唯一播放器，
+        # bridge = 控制/状态端。关闭时 target=cch 的点歌不再 prepare / 不再 /cch/cast，
+        # 原厂云链自行播放（我方投送只会造出并发的第二声源，§2.27/§2.30）。
+        "cch_cast_enabled": False,
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）

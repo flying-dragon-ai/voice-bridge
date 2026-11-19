@@ -272,6 +272,13 @@ APP_CONFIG = {
         "songloft_user": "admin",
         # songloft_password 缺省回落环境变量 SONGLOFT_PASSWORD（NAS compose 注入，不入库）
         "songloft_password": "",
+        # CCH 主动投送总开关，默认关（票 16/17 的 D 方向裁决）：
+        # 原厂 = 唯一播放器（出声/曲库/权益/焦点），bridge = 控制/状态端。
+        # 关闭时 target=cch 的语音点歌不再走 Songloft prepare + /cch/cast，也不出声——
+        # 原厂云链已在播，我方任何投送都是并发的第二声源（§2.27 桥 8/8 必输；§2.30
+        # 实测"原厂暂停后桥仍在唱"，audio_flinger track 表 Client=com.cch.bridge Active=yes）。
+        # 打开即回滚到 v0.2.0 行为，同时须回装播放版桥 APK。
+        "cch_cast_enabled": False,
     },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）

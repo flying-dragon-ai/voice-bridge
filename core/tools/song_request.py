@@ -258,8 +258,19 @@ _cch_state = {"entry": 0, "items": [], "session": _CCH_SESSION}
 
 
 async def _run_cch(action: str, args: dict) -> str:
-    from core.music.cch_cast import cast, resolve_ticket_url, revoke
+    from core.music.cch_cast import cast, cast_enabled, resolve_ticket_url, revoke
     from core.tools.registry import suppress_reply
+
+    # CCH 主动投送默认关闭（票 16/17 的 D 方向裁决）：原厂 = 唯一播放器，bridge = 控制/状态端。
+    # 关闭时**不出声、不投送、也不谎报动作**——原厂云链已经在处理这条语音请求，
+    # 我方任何 TTS 回复都是干扰，故显式 suppress_reply()。
+    # 依据：facts §2.27（双链并发、桥 8/8 必输）+ §2.30（桥是独立第二声源，暂停后仍出声）。
+    if not cast_enabled():
+        logger.info(
+            f"[SongRequest] cch cast disabled (enabled=False) — 原厂链路自行处理 action={action}"
+        )
+        suppress_reply()
+        return ""
 
     if action in ("pause", "resume", "next", "prev", "stop"):
         # CCH 播控经 DLNA RenderingControl/AVTransport（patched dlnaserver）；
