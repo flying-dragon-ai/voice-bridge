@@ -576,6 +576,7 @@ class APIServer:
         self.app.router.add_post("/api/inject", self.handle_inject)  # ASR 注入窗口（闸门A + P2唤醒）
         self.app.router.add_get("/api/inject", self.handle_inject_status)
         self.app.router.add_post("/api/external/text", self.handle_external_text)  # 外部 ASR 文本入口（B-37）
+        self.app.router.add_post("/api/external/np", self.handle_external_np)  # CCH 音乐事件（票 03 编排面）
         self.app.router.add_post("/api/inject/stream", self.inject_relay.handle_upstream)  # PC 上行 PCM
         self.app.router.add_get("/api/inject/relay", self.inject_relay.handle_health)  # 中继观测
         self.app.router.add_get("/api/inject/text", self.inject_relay.handle_ws_text)  # 文本回传 WS
@@ -1555,6 +1556,60 @@ class APIServer:
             name="external-text-finish",
         )
         return web.json_response({"success": True, "accepted": True}, status=202)
+
+    async def handle_external_np(self, request: web.Request) -> web.Response:
+        """POST /api/external/np —— CCH 音乐事件上行（票 03 编排面，2026-11-20）。
+
+        写类 Bearer 由 `api_auth_middleware` 先行（worker 用 BRIDGE_TOKEN 同源）；
+        限源复用 `EXTERNAL_TEXT_ALLOW_CIDR`（capture 容器 10.10.10.2 已在白名单）。
+
+        请求体：{"kind": "META"|"STATE", "extras": {...}, "device_ts": "..."}
+        编排动作（core/music/cch_np.py）：STATE finish/stop → 换代 cast 下一首；
+        suspend → 记录恢复点；其余 recorded。双关（np_enabled=false）时只记录不编排。
+        """
+        caller = self._caller_tag(request)
+        cidrs = resolve_external_text_cidrs()
+        peer_ip = self._remote_peer(request)
+        if cidrs.refused or not peer_allowed(peer_ip, cidrs.networks):
+            logger.warning(f"[APIServer] /api/external/np 拒绝 caller={caller} peer={peer_ip}")
+            return web.json_response(
+                {"success": False, "code": "np_refused", "error": "限源拒绝"},
+                status=503,
+            )
+        try:
+            n = int(request.headers.get("Content-Length") or 0)
+            if n <= 0 or n > 32768:
+                raise ValueError("bad size")
+            body = json.loads(await request.read())
+        except Exception:
+            return web.json_response(
+                {"success": False, "code": "np_bad_payload", "error": "载荷非法"}, status=400)
+        kind = str(body.get("kind") or "")
+        if kind not in ("META", "STATE"):
+            return web.json_response(
+                {"success": False, "code": "np_bad_kind", "error": "kind must be META|STATE"},
+                status=400,
+            )
+        extras = body.get("extras") or {}
+        device_ts = str(body.get("device_ts") or "")
+        try:
+            from core.music.cch_np import np_enabled as np_gate
+            from core.music import cch_np
+
+            if not np_gate():
+                # 双关：只记录不编排（与 cast_enabled=False 语义一致）
+                cch_np.snapshot()
+                logger.info(f"[APIServer] /api/external/np 记录（编排关闭）caller={caller}")
+                return web.json_response({"success": True, "action": "recorded_only"})
+            action = await cch_np.on_np_event(kind, extras, device_ts)
+            logger.info(f"[APIServer] /api/external/np kind={kind} action={action['action']} caller={caller}")
+            return web.json_response({"success": True, "action": action.get("action", "recorded")})
+        except Exception as exc:  # noqa: BLE001 - 编排异常不阻塞 worker
+            logger.error(f"[APIServer] /api/external/np 编排异常: {type(exc).__name__}: {exc}")
+            return web.json_response(
+                {"success": False, "code": "np_orchestration_error",
+                 "error": type(exc).__name__}, status=500,
+            )
 
     async def handle_livez(self, request: web.Request) -> web.Response:
         """GET /livez —— 进程存活（不看设备；不走 /api/* 鉴权）。"""

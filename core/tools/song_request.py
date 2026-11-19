@@ -329,10 +329,11 @@ async def _run_cch(action: str, args: dict) -> str:
             return f"CCH 点播失败：{type(exc).__name__}"
         if not ok:
             return f"CCH 点播失败（9102 /cmd：{detail}）"
-        _cch_state.update({"entry": 0, "items": items[:1]})
+        # 存整队供 cch_np 换代编排（STATE finish → advance 下一首）；票据按 entry 逐条 prepare
+        _cch_state.update({"entry": 0, "items": items})
         suppress_reply()   # kwqq 源已起播：本轮收尾 TTS 不得顶掉它
         name = str(render_data.get("audioName") or "歌曲")
-        return f"已在 CCH 上为你播放《{name}》"
+        return f"已在 CCH 上为你播放《{name}》（队列 {len(items)} 首）"
 
     # CCH 主动投送默认关闭（票 16/17 的 D 方向裁决）：原厂 = 唯一播放器，bridge = 控制/状态端。
     # 关闭时**不出声、不投送、也不谎报动作**——原厂云链已经在处理这条语音请求，
