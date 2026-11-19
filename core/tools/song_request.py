@@ -36,6 +36,30 @@ NAME = "song_request"
 # spec 裁决 1：a = 复述即执行（guardrails A 级一次确认）
 RISK = "a"
 
+# 本轮默认播放目标（T2 ticket 08）：规则兜底层。
+# 外部文本轮按 ASR 来源设置（cch-screen→cch，LX06 原生→lx06）；轮末 reset。
+# 模块级在途上下文——单事件循环串行会话，与 suppress_reply 同构。
+_playback_target_context = ""
+
+
+def set_playback_target(target: str) -> None:
+    """由会话层在轮首设置本轮默认目标（cch/lx06）；仅接受白名单值。"""
+    global _playback_target_context
+    _playback_target_context = target if target in ("cch", "lx06") else ""
+
+
+def reset_playback_target() -> None:
+    """轮末清除本轮默认目标（仿 suppress_reply 的复位点）。"""
+    global _playback_target_context
+    _playback_target_context = ""
+
+
+def _resolve_target(explicit) -> str:
+    """目标判定（两层结合）：LLM 显式 target 优先，否则本轮上下文兜底，默认 lx06。"""
+    if isinstance(explicit, str) and explicit.strip().lower() in ("cch", "lx06"):
+        return explicit.strip().lower()
+    return _playback_target_context or "lx06"
+
 # 消费铁律（spec §0）：播放类消费方只吃 ≤320k mp3
 _QUALITY = "320k"
 
@@ -97,6 +121,15 @@ TOOL_SPEC = {
                     "type": "string",
                     "description": "可选：指定音源（kuwo/netease/qq），默认按配置顺序",
                 },
+                "target": {
+                    "type": "string",
+                    "enum": ["cch", "lx06"],
+                    "description": (
+                        "可选：播放目标设备。用户明确说「在小爱音箱上播放」时为 lx06；"
+                        "「在天猫精灵/屏幕上播放」或未指定时按当前对话来源设备决定"
+                        "（CCH 语音默认 cch）。"
+                    ),
+                },
             },
             "required": ["action"],
         },
@@ -132,6 +165,13 @@ async def run(args: dict) -> str:
         return "在线点歌功能未启用（song_request.enabled），请在配置中打开后再用"
 
     action = str(args.get("action") or "").strip().lower()
+    target = _resolve_target(args.get("target"))
+
+    # CCH 语音播控（T2 ticket 08）：目标为 CCH 时走投屏链（Songloft 票据 URL
+    # → /cch/cast → dlnaserver → 桥 APK），不经 LX06 的 speaker.play。
+    if target == "cch":
+        return await _run_cch(action, args)
+
     if _managed_mode():
         return await _run_managed(action, args)
     if action == "stop":
@@ -207,6 +247,69 @@ async def _run_managed(action: str, args: dict) -> str:
 
     suppress_reply()   # 音乐已起播：本轮收尾 TTS 不得顶掉它
     return result
+
+
+# ---- CCH 语音播控（T2 ticket 08）----
+# 目标设备 = cch 时：搜歌 → Songloft prepare 拿票据 URL → /cch/cast 投屏。
+# 播控（pause/resume/next/stop）经 patched dlnaserver 的 DLNA SOAP；stop 同时撤票。
+_CCH_SESSION = "bridge-cch"
+_CCH_EPOCH = 1
+_cch_state = {"entry": 0, "items": [], "session": _CCH_SESSION}
+
+
+async def _run_cch(action: str, args: dict) -> str:
+    from core.music.cch_cast import cast, resolve_ticket_url, revoke
+    from core.tools.registry import suppress_reply
+
+    if action in ("pause", "resume", "next", "prev", "stop"):
+        # CCH 播控经 DLNA RenderingControl/AVTransport（patched dlnaserver）；
+        # 本阶段先给出确定性响应，真机接线在 deploy 层做（见 ticket 08 依赖）。
+        if action == "stop":
+            cur = _cch_state.get("items") or []
+            entry = cur[_cch_state["entry"]].get("id", "") if cur else ""
+            try:
+                await revoke(_CCH_SESSION, _CCH_EPOCH, entry)
+            except Exception as exc:  # noqa: BLE001 - 撤票失败不阻塞响应
+                logger.warning(f"[SongRequest] cch revoke err: {type(exc).__name__}")
+            _cch_state.update({"entry": 0, "items": []})
+            return "已停止 CCH 播放"
+        if action in ("next", "prev"):
+            items = _cch_state.get("items") or []
+            if items:
+                _cch_state["entry"] = max(0, min(len(items) - 1,
+                                                 _cch_state["entry"] + (1 if action == "next" else -1)))
+                suppress_reply()
+                return "已切换 CCH 曲目"
+            return "CCH 无播放队列"
+        suppress_reply()
+        return "已暂停 CCH 播放" if action == "pause" else "已恢复 CCH 播放"
+
+    # play / album：搜歌 → Songloft prepare → /cch/cast
+    query = str(args.get("query") or "").strip()
+    items = await _managed_collect(
+        query, args.get("source"),
+        artist=str(args.get("artist") or "").strip(),
+        album=(action == "album"),
+    )
+    if not items:
+        return f"没有找到能播放的曲目《{query}》"
+    item = items[0]
+    ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
+           "extra": item.get("extra") or {}}
+    entry = str(item.get("id") or "cch-1")
+    try:
+        ticket_url = await resolve_ticket_url(
+            ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
+        ok = await cast(ticket_url)
+    except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
+        logger.error(f"[SongRequest] cch cast failed: {type(exc).__name__}: {exc}")
+        return f"CCH 投屏失败：{type(exc).__name__}"
+    if not ok:
+        return "CCH 投屏失败（/cch/cast 拒绝，检查 CAST_ALLOW 与 PANEL_TOKEN）"
+    _cch_state.update({"entry": 0, "items": items[:1]})
+    suppress_reply()
+    name = str(item.get("name") or "歌曲")
+    return f"已在 CCH 上为你播放《{name}》"
 
 
 # ---- HTTP 两跳（kw-qq-api envelope 契约，事实源 musicdl API-REFERENCE §3/§4） ----

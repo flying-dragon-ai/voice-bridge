@@ -325,6 +325,13 @@ class ExternalConversationController:
         turn = conversation_pipeline.begin_turn("external_text")
         self._pipeline_turn = turn
         outcome = "played"
+        # T2 ticket 08：按 ASR 来源设本轮默认播放目标（规则兜底层）。
+        # CCH 语音（source=cch-screen 等 cch 前缀）默认投 CCH；其余维持 lx06。
+        # LLM 可在 song_request  tool 的 target 参数里显式覆盖。
+        from core.tools.song_request import set_playback_target
+
+        _asr_source = str(req.get("source") or "").lower()
+        set_playback_target("cch" if "cch" in _asr_source else "lx06")
         try:
             result = await self._run_one_turn()
             # 单轮语义：continue 也结束会话（外部轮无下一轮）。
@@ -337,6 +344,10 @@ class ExternalConversationController:
                 module=self.LOG_MODULE,
             )
         finally:
+            # T2 ticket 08：轮末清除本轮播放目标兜底，避免污染后续轮。
+            from core.tools.song_request import reset_playback_target
+
+            reset_playback_target()
             if outcome == "played" and turn is not None and turn.cancelled:
                 outcome = "cancelled"
             self._pipeline_turn = None
