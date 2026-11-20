@@ -336,25 +336,20 @@ async def _run_cch(action: str, args: dict) -> str:
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")
         try:
-            ticket_url = await resolve_ticket_url(
-                ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
             meta = await kwqq_meta(ref["id"])
-            render_data = build_render_data(ticket_url, item, meta)
             if m5_enabled():
-                # M5 轨：进程内 agmcPlay（死实例可起播）；token 部署幂等。
-                # audioUrl 优先 kwqq-api 直链（sign 时限 ≈ 票据语义）：songloft 票据链
-                # 的 kwqq 插件链接曾过期/反盗链返 HTML（2026-11-20 实测 30s 误parse）。
+                # M5 轨不依赖 songloft 票据：prepare session 过期 poll 404 曾致整链
+                # 异常不播、原厂试听独播（2026-11-20 17:44 实测）；kwqq 直链为主。
                 await host_token_deploy()
                 import aiohttp
                 async with aiohttp.ClientSession() as http:
                     direct = await _pick_url(http, ref["source"] or "kuwo", item)
-                play_url = direct or ticket_url
-                if direct:
-                    render_data = build_render_data(play_url, item, meta)
-                else:
+                if not direct:
                     # fail-safe：kwqq 解析冷却期直链缺 ⇒ 不降级 songloft 试听票
                     # （30s 预览误导用户，2026-11-20 实测），报错让上层换源/重试。
                     return "CCH 音源暂不可用（kwqq 解析冷却），请稍后再试或换音源"
+                play_url = direct
+                render_data = build_render_data(play_url, item, meta)
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
@@ -380,6 +375,9 @@ async def _run_cch(action: str, args: dict) -> str:
             else:
                 # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；
                 # 事后验证 cast_need_m5（8s 保守值，P95 基线待采）
+                ticket_url = await resolve_ticket_url(
+                    ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
+                render_data = build_render_data(ticket_url, item, meta)
                 ok, detail = await cast_native(render_data)
                 if ok and not await wait_np_play(8.0):
                     return "CCH 点播未起播（NEED_M5：死实例，待 M5 刷机）"
