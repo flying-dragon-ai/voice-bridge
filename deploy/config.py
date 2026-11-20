@@ -279,6 +279,11 @@ APP_CONFIG = {
         # 实测"原厂暂停后桥仍在唱"，audio_flinger track 表 Client=com.cch.bridge Active=yes）。
         # 打开即回滚到 v0.2.0 行为，同时须回装播放版桥 APK。
         "cch_cast_enabled": False,
+        # D 方向 kwqq 点播链（2026-11-20 M5 验收 6 项全过 + 自愈闭环 VERIFIED 后打开）：
+        # 语音点歌 target=cch 走 M5 宿主（Zygisk :business 进程内 agmcPlay）自源起播；
+        # M5 未就绪时 cast 轨事后验证返 NEED_M5（死实例感知）。回滚 = 两开关置 False。
+        "cch_np_enabled": True,
+        "cch_m5_enabled": True,
     },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
