@@ -22,6 +22,7 @@ stop 走 speaker.stop_device_audio()（bridge 无原生队列，spec 裁决 3）
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 
@@ -333,11 +334,26 @@ async def _run_cch(action: str, args: dict) -> str:
             meta = await kwqq_meta(ref["id"])
             render_data = build_render_data(ticket_url, item, meta)
             if m5_enabled():
-                # M5 轨：进程内 agmcPlay（死实例可起播）；token 部署幂等
+                # M5 轨：进程内 agmcPlay（死实例可起播）；token 部署幂等。
+                # audioUrl 优先 kwqq-api 直链（sign 时限 ≈ 票据语义）：songloft 票据链
+                # 的 kwqq 插件链接曾过期/反盗链返 HTML（2026-11-20 实测 30s 误parse）。
                 await host_token_deploy()
-                ok, status = await host_cmd("play", url=ticket_url)
+                import aiohttp
+                async with aiohttp.ClientSession() as http:
+                    direct = await _pick_url(http, ref["source"] or "kuwo", item)
+                play_url = direct or ticket_url
+                if direct:
+                    render_data = build_render_data(play_url, item, meta)
+                else:
+                    # fail-safe：kwqq 解析冷却期直链缺 ⇒ 不降级 songloft 试听票
+                    # （30s 预览误导用户，2026-11-20 实测），报错让上层换源/重试。
+                    return "CCH 音源暂不可用（kwqq 解析冷却），请稍后再试或换音源"
+                ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
+                # 显示补投（A1 路径）：纯 VIEW intent renderData，不带播控副作用
+                await musicctl("render", {"renderData": json.dumps(
+                    render_data, ensure_ascii=False)})
             else:
                 # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；
                 # 事后验证 cast_need_m5（8s 保守值，P95 基线待采）
