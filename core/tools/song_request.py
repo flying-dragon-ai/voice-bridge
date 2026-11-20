@@ -264,12 +264,16 @@ async def _run_cch(action: str, args: dict) -> str:
         cast_enabled,
         cast_native,
         cast_native_simple,
+        host_cmd,
+        host_token_deploy,
         kwqq_meta,
+        m5_enabled,
         musicctl,
         np_enabled,
         prepare_playback,
         resolve_ticket_url,
         revoke,
+        wait_np_play,
     )
     from core.tools.registry import suppress_reply
 
@@ -328,13 +332,23 @@ async def _run_cch(action: str, args: dict) -> str:
                 ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
             meta = await kwqq_meta(ref["id"])
             render_data = build_render_data(ticket_url, item, meta)
-            await prepare_playback()  # 预清残留 + 条件重注册（facts §2.48）
-            ok, detail = await cast_native(render_data)
+            if m5_enabled():
+                # M5 轨：进程内 agmcPlay（死实例可起播）；token 部署幂等
+                await host_token_deploy()
+                ok, status = await host_cmd("play", url=ticket_url)
+                if not ok:
+                    return f"CCH 点播失败（M5：{status}）"
+            else:
+                # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；
+                # 事后验证 cast_need_m5（8s 保守值，P95 基线待采）
+                ok, detail = await cast_native(render_data)
+                if ok and not await wait_np_play(8.0):
+                    return "CCH 点播未起播（NEED_M5：死实例，待 M5 刷机）"
+                if not ok:
+                    return f"CCH 点播失败（9102 /cmd：{detail}）"
         except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
             return f"CCH 点播失败：{type(exc).__name__}"
-        if not ok:
-            return f"CCH 点播失败（9102 /cmd：{detail}）"
         # 存整队供 cch_np 换代编排（STATE finish → advance 下一首）；票据按 entry 逐条 prepare
         _cch_state.update({"entry": 0, "items": items})
         suppress_reply()   # kwqq 源已起播：本轮收尾 TTS 不得顶掉它

@@ -107,9 +107,13 @@ async def _advance_if_finished() -> dict:
             from core.music.cch_cast import (
                 build_render_data,
                 cast_native,
+                host_cmd,
+                host_token_deploy,
                 kwqq_meta,
+                m5_enabled,
                 prepare_playback,
                 resolve_ticket_url,
+                wait_np_play,
             )
 
             ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
@@ -119,8 +123,15 @@ async def _advance_if_finished() -> dict:
                 entry=str(item.get("id") or f"cch-{nxt}"))
             meta = await kwqq_meta(ref["id"])
             render_data = build_render_data(ticket_url, item, meta)
-            await prepare_playback()  # 预清残留 + 条件重注册（facts §2.48）
-            ok, detail = await cast_native(render_data)
+            if m5_enabled():
+                await host_token_deploy()
+                ok, status = await host_cmd("play", url=ticket_url)
+                detail = status
+            else:
+                # 活实例轨：曲末实例死 ⇒ cast 大概率无声；事后验证 NEED_M5 感知
+                ok, detail = await cast_native(render_data)
+                if ok and not await wait_np_play(5.0):
+                    ok, detail = False, "NEED_M5"
             _last_advance_at = loop.time()
             logger.info(f"[CchNp] advance {idx}->{nxt} ok={ok} detail={detail}", module="CchNp")
             return {"action": "advanced", "index": nxt, "ok": ok}

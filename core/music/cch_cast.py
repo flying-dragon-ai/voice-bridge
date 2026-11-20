@@ -287,8 +287,80 @@ async def cast_native_simple(command: int) -> tuple[bool, str]:
 _last_core_pid: int = 0
 
 
-async def musicctl(op: str) -> tuple[bool, dict]:
-    """9102 /musicctl 白名单三 op（prestop/reinit/corepid）。返回 (ok, payload)。"""
+def m5_enabled() -> bool:
+    """M5 Zygisk 宿主控制通道开关（默认 False；刷机 6 项验收通过后由用户打开）。"""
+    val = _cfg("cch_m5_enabled", False)
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
+def host_derived_key() -> str:
+    """HMAC-SHA256(BRIDGE_TOKEN, salt) hex —— 与 dex TokenAuth 同派生（salt 定死常量）。"""
+    import hashlib
+    import hmac
+    token = tts_token()
+    return hmac.new(token.encode(), b"cch-m5-auth-v1", hashlib.sha256).hexdigest()
+
+
+async def host_token_deploy() -> tuple[bool, dict]:
+    """运行时部署派生 key 到设备内部目录（9102 hosttoken op 走 su = root 域）。幂等。"""
+    return await musicctl("hosttoken", {"key": host_derived_key()})
+
+
+async def host_cmd(cmd: str, url: str = None, extra: str = None,
+                   timeout_s: float = 5.0) -> tuple[bool, str]:
+    """M5 控制通道命令（broadcast fire-and-forget + last_result cmd_id 回读）。
+
+    返回 (ok, status)：status = OK / NEED_M5 / AUTH_FAILED / INVALID_CMD / TIMEOUT。
+    cmd_id 不匹配 = 广播丢失或处理中；匹配但 AUTH_FAILED = token 不匹配。
+    """
+    import asyncio
+    import uuid
+    cmd_id = uuid.uuid4().hex[:12]
+    body = {"cmd": cmd, "token": host_derived_key(), "cmd_id": cmd_id}
+    if url:
+        body["url"] = url
+    if extra:
+        body["extra"] = extra
+    ok, _ = await musicctl("hostcmd", body)
+    if not ok:
+        return False, "NEED_M5"
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        await asyncio.sleep(0.5)
+        ok2, payload = await musicctl("hostresult", {})
+        result = str(payload.get("result") or "")
+        if cmd_id in result:
+            if '"status":"OK"' in result:
+                return True, "OK"
+            for st in ("AUTH_FAILED", "INVALID_CMD", "NOT_REGISTERED"):
+                if st in result:
+                    return False, "NEED_M5" if st == "NOT_REGISTERED" else st
+            return False, "NEED_M5"
+    return False, "TIMEOUT"
+
+
+async def wait_np_play(timeout_s: float) -> bool:
+    """事后验证（cast_need_m5 判据）：timeout 内 np STATE 更新为 play = 起播生效。
+    基线 P95 待采（a5/a7 样本 <10），未标定前 cast 轨暂用 8s 保守值（调用方传入）。"""
+    import asyncio
+    from core.music import cch_np
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_s
+    base_ts = (cch_np.snapshot().get("state") or {}).get("device_ts")
+    while loop.time() < deadline:
+        await asyncio.sleep(0.5)
+        st = cch_np.snapshot().get("state") or {}
+        if st.get("device_ts") != base_ts and str(st.get("extras", {}).get("statusStr")).lower() == "play":
+            return True
+    return False
+
+
+async def musicctl(op: str, body: dict = None) -> tuple[bool, dict]:
+    """9102 /musicctl 白名单 op（prestop/reinit/corepid/playlist/control/hostcmd/
+    hostresult/hosttoken）。返回 (ok, payload)。"""
     import aiohttp
 
     token = tts_token()
@@ -297,7 +369,7 @@ async def musicctl(op: str) -> tuple[bool, dict]:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     async with aiohttp.ClientSession() as http:
         async with http.post(
-            f"{tts_base()}/musicctl", json={"op": op}, headers=headers,
+            f"{tts_base()}/musicctl", json={"op": op, **(body or {})}, headers=headers,
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             ok = 200 <= resp.status < 300
