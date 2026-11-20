@@ -339,6 +339,19 @@ async def host_cmd(cmd: str, url: str = None, extra: str = None,
                 if st in result:
                     return False, "NEED_M5" if st == "NOT_REGISTERED" else st
             return False, "NEED_M5"
+    # broadcast fire-and-forget 间歇丢（rc=0 但 receiver 无 recv，2026-11-20 实测）⇒ 重发一次
+    ok, _ = await musicctl("hostcmd", body)
+    if not ok:
+        return False, "NEED_M5"
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        await asyncio.sleep(0.5)
+        ok2, payload = await musicctl("hostresult", {})
+        result = str(payload.get("result") or "")
+        if cmd_id in result:
+            if '"status":"OK"' in result:
+                return True, "OK"
+            return False, "NEED_M5"
     return False, "TIMEOUT"
 
 

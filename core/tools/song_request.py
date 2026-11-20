@@ -325,6 +325,13 @@ async def _run_cch(action: str, args: dict) -> str:
         if not items:
             return f"没有找到能播放的曲目《{query}》"
         item = items[0]
+        # artist 过滤：kuwo 搜索相关性曾首结果错歌（晴天→风吹麦浪，2026-11-20 实测）
+        _artist = str(args.get("artist") or "").strip()
+        if _artist:
+            for it in items:
+                if _artist in str(it.get("artist") or ""):
+                    item = it
+                    break
         ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")
@@ -351,6 +358,22 @@ async def _run_cch(action: str, args: dict) -> str:
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
+                # 歌词通道（A3）：kwqq LRC → 设备本地 httpd → lyricUrl；失败不阻塞播放
+                try:
+                    async with aiohttp.ClientSession() as http:
+                        lr = await _api(http, f"/{ref['source'] or 'kuwo'}/lyric",
+                                        {"id": ref["id"]})
+                    lrc = str((lr or {}).get("lyric") or "") if isinstance(lr, dict) else ""
+                    if lrc:
+                        lok, _ = await musicctl("lyric", {"id": ref["id"], "lrc": lrc})
+                        if lok:
+                            lurl = f"http://127.0.0.1:18081/{ref['id']}.lrc"
+                            render_data["lyricUrl"] = lurl
+                            ext = json.loads(render_data.get("audioExt") or "{}")
+                            ext["lyric"] = lurl
+                            render_data["audioExt"] = json.dumps(ext, ensure_ascii=False)
+                except Exception:  # noqa: BLE001 - 歌词失败不阻塞播放
+                    pass
                 # 显示补投（A1 路径）：纯 VIEW intent renderData，不带播控副作用
                 await musicctl("render", {"renderData": json.dumps(
                     render_data, ensure_ascii=False)})
