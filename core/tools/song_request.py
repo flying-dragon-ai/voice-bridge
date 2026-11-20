@@ -265,7 +265,9 @@ async def _run_cch(action: str, args: dict) -> str:
         cast_native,
         cast_native_simple,
         kwqq_meta,
+        musicctl,
         np_enabled,
+        prepare_playback,
         resolve_ticket_url,
         revoke,
     )
@@ -291,7 +293,8 @@ async def _run_cch(action: str, args: dict) -> str:
                 suppress_reply()
                 return "已切换 CCH 曲目" if ok else f"CCH 切歌失败：{detail}"
             # stop：旧票逐条撤（spec 裁决 4「换代旧票逐条 /managed/command stop」，
-            # 不依赖 NewEpoch）+ pause 收尾（原厂 DIRECT_STOP 语义无外部通道，pause 可靠）
+            # 不依赖 NewEpoch）+ prestop 收尾（Control 22 directStop：停播且清 native
+            # 残留队列；18 stop 有 isQuitting 永久 true 副作用弃用，facts §2.48③）
             cur = _cch_state.get("items") or []
             for i, it in enumerate(cur):
                 entry_id = str(it.get("id") or f"cch-{i}")
@@ -299,7 +302,7 @@ async def _run_cch(action: str, args: dict) -> str:
                     await revoke(_CCH_SESSION, _CCH_EPOCH, entry_id)
                 except Exception as exc:  # noqa: BLE001 - 撤票失败不阻塞响应（30min TTL 兜底）
                     logger.warning(f"[SongRequest] cch revoke({entry_id}) err: {type(exc).__name__}")
-            await cast_native_simple(3)
+            await musicctl("prestop")
             _cch_state.update({"entry": 0, "items": []})
             suppress_reply()
             return "已停止 CCH 播放"
@@ -325,6 +328,7 @@ async def _run_cch(action: str, args: dict) -> str:
                 ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
             meta = await kwqq_meta(ref["id"])
             render_data = build_render_data(ticket_url, item, meta)
+            await prepare_playback()  # 预清残留 + 条件重注册（facts §2.48）
             ok, detail = await cast_native(render_data)
         except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")

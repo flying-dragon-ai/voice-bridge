@@ -283,6 +283,58 @@ async def cast_native_simple(command: int) -> tuple[bool, str]:
             return ok, f"http {resp.status}"
 
 
+# ---- A3-4 起播前编排（facts §2.48：续播归因 native 残留队列 / 重注册外部路径） ----
+_last_core_pid: int = 0
+
+
+async def musicctl(op: str) -> tuple[bool, dict]:
+    """9102 /musicctl 白名单三 op（prestop/reinit/corepid）。返回 (ok, payload)。"""
+    import aiohttp
+
+    token = tts_token()
+    if not token:
+        return False, {"error": "tts token not configured"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            f"{tts_base()}/musicctl", json={"op": op}, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            ok = 200 <= resp.status < 300
+            try:
+                payload = await resp.json()
+            except Exception:  # noqa: BLE001 - 非 JSON 响应收敛空 payload
+                payload = {}
+            logger.info(f"[CchCast] /musicctl op={op} http={resp.status} ok={ok}", module="CchCast")
+            return ok, payload if isinstance(payload, dict) else {}
+
+
+async def prepare_playback() -> dict:
+    """起播前编排：prestop(22) 清 native 残留队列 → :core pid 变化则 kill :business 重注册。
+
+    - prestop = directStop：清残留续播源且无 isQuitting 副作用（18 stop 弃用，§2.48③）；
+    - reinit 条件触发（pid 变化）：kill 后 service 自动重启、静态清零（含 stale 注册与
+      isQuitting），initPlayer 由后续 cast 的 VIEW intent 完成（§2.48⑥）；不每次 kill，
+      避免曲间切换把用户踢出歌词页；
+    - 任一 op 失败不阻塞 cast（降级原链，调用方只记日志）。
+    """
+    global _last_core_pid
+    result = {"prestop": False, "reinit": False, "core_pid": 0}
+    ok, _ = await musicctl("prestop")
+    result["prestop"] = ok
+    ok, payload = await musicctl("corepid")
+    pid = int(payload.get("core_pid") or 0)
+    result["core_pid"] = pid
+    if ok and pid and _last_core_pid and pid != _last_core_pid:
+        ok2, _ = await musicctl("reinit")
+        result["reinit"] = ok2
+        logger.info(
+            f"[CchCast] core pid changed {_last_core_pid}->{pid} reinit={ok2}", module="CchCast")
+    if pid:
+        _last_core_pid = pid
+    return result
+
+
 async def speak(text: str) -> tuple[bool, str]:
     """9102 /speak 原厂 TTS 播报（票 04 下行面）。
 

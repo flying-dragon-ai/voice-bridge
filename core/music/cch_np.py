@@ -108,6 +108,7 @@ async def _advance_if_finished() -> dict:
                 build_render_data,
                 cast_native,
                 kwqq_meta,
+                prepare_playback,
                 resolve_ticket_url,
             )
 
@@ -118,6 +119,7 @@ async def _advance_if_finished() -> dict:
                 entry=str(item.get("id") or f"cch-{nxt}"))
             meta = await kwqq_meta(ref["id"])
             render_data = build_render_data(ticket_url, item, meta)
+            await prepare_playback()  # 预清残留 + 条件重注册（facts §2.48）
             ok, detail = await cast_native(render_data)
             _last_advance_at = loop.time()
             logger.info(f"[CchNp] advance {idx}->{nxt} ok={ok} detail={detail}", module="CchNp")
@@ -190,6 +192,7 @@ async def _recast_current() -> dict:
             build_render_data,
             cast_native,
             kwqq_meta,
+            prepare_playback,
             resolve_ticket_url,
         )
 
@@ -200,6 +203,7 @@ async def _recast_current() -> dict:
             entry=str(item.get("id") or f"cch-{idx}"))
         meta = await kwqq_meta(ref["id"])
         render_data = build_render_data(ticket_url, item, meta)
+        await prepare_playback()  # 预清残留 + 条件重注册（facts §2.48）
         ok, detail = await cast_native(render_data)
         return {"action": "recast", "ok": ok, "detail": detail}
     except Exception as exc:  # noqa: BLE001
