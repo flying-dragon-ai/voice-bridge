@@ -96,10 +96,22 @@ async def resolve_ticket_url(ref: dict, *, session: str, epoch: int, entry: str)
                 raise ManagedError(f"cch_cast prepare: http {resp.status}")
         loop = asyncio.get_event_loop()
         deadline = loop.time() + _PREPARE_TIMEOUT_S
+        reprepared = False
         while loop.time() < deadline:
             await asyncio.sleep(_PREPARE_POLL_S)
             qs = urlencode({"session": session, "epoch": epoch, "entry": entry})
             async with http.get(f"{base}/api/v1/managed/prepare?{qs}", headers=headers) as resp:
+                if resp.status == 404 and not reprepared:
+                    # songloft 重启/op 丢失（ops 内存态，ready op 不恢复，2026-11-20
+                    # 17:44 实测 restarts=2）⇒ 新代次 re-prepare 自愈一次，保 managed 语义。
+                    reprepared = True
+                    epoch += 1
+                    body["epoch"] = epoch
+                    async with http.post(f"{base}/api/v1/managed/prepare",
+                                         json=body, headers=headers) as rp:
+                        if rp.status != 202:
+                            raise ManagedError(f"cch_cast re-prepare: http {rp.status}")
+                    continue
                 if resp.status != 200:
                     raise ManagedError(f"cch_cast prepare poll: http {resp.status}")
                 data = await resp.json()

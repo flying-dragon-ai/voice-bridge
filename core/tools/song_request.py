@@ -338,17 +338,36 @@ async def _run_cch(action: str, args: dict) -> str:
         try:
             meta = await kwqq_meta(ref["id"])
             if m5_enabled():
-                # M5 轨不依赖 songloft 票据：prepare session 过期 poll 404 曾致整链
-                # 异常不播、原厂试听独播（2026-11-20 17:44 实测）；kwqq 直链为主。
+                # M5 轨：songloft 票据为主（多源统一门面 + 可撤销 + 代次闸门 +
+                # 凭据隔离；poll 404 已加 re-prepare 自愈）。票据链失败/预览 ⇒
+                # kwqq 直链 fallback（走 _sources 多源策略 + 预览检测）。
                 await host_token_deploy()
                 import aiohttp
-                async with aiohttp.ClientSession() as http:
-                    direct = await _pick_url(http, ref["source"] or "kuwo", item)
-                if not direct:
-                    # fail-safe：kwqq 解析冷却期直链缺 ⇒ 不降级 songloft 试听票
-                    # （30s 预览误导用户，2026-11-20 实测），报错让上层换源/重试。
-                    return "CCH 音源暂不可用（kwqq 解析冷却），请稍后再试或换音源"
-                play_url = direct
+                play_url = None
+                try:
+                    ticket_url = await resolve_ticket_url(
+                        ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
+                    async with aiohttp.ClientSession() as http:
+                        async with http.head(ticket_url, timeout=aiohttp.ClientTimeout(total=10)) as hr:
+                            clen = int(hr.headers.get("Content-Length") or 0)
+                            ctype = str(hr.headers.get("Content-Type") or "")
+                    if clen >= 500000 and "audio" in ctype:
+                        play_url = ticket_url
+                    else:
+                        logger.warning(
+                            f"[SongRequest] ticket preview-like (len={clen} type={ctype}); fallback direct",
+                            module="SongRequest")
+                except Exception as exc:  # noqa: BLE001 - 票据链失败降级直链
+                    logger.warning(f"[SongRequest] ticket chain failed: {type(exc).__name__}; fallback direct",
+                                   module="SongRequest")
+                if not play_url:
+                    async with aiohttp.ClientSession() as http:
+                        for src in _sources(ref["source"] or None):
+                            play_url = await _pick_url(http, src, item)
+                            if play_url:
+                                break
+                if not play_url:
+                    return "CCH 音源暂不可用（kwqq 解析冷却/预览降级），请稍后再试或换音源"
                 render_data = build_render_data(play_url, item, meta)
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
@@ -555,6 +574,16 @@ async def _pick_url(session, source: str, item: dict) -> str | None:
         logger.warning(
             f"[SongRequest] {source} item {item.get('id')} returned ekey "
             "(encrypted container); skipped per ADR-0002"
+        )
+        return None
+    # 预览检测：kuwo 匿名风控间歇降级试听链（2026-11-20 实测 30s/120KB）；
+    # 全曲 mp3 320k 通常 >1MB / duration>60s，低于阈值视为预览弃用换源。
+    dur = data.get("duration_s") or 0
+    size = data.get("size_bytes") or 0
+    if (dur and dur < 60) or (size and size < 500000):
+        logger.warning(
+            f"[SongRequest] {source} item {item.get('id')} preview-like "
+            f"(dur={dur}s size={size}); skipped"
         )
         return None
     return url
