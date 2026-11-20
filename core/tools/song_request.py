@@ -290,13 +290,15 @@ async def _run_cch(action: str, args: dict) -> str:
                 ok, detail = await cast_native_simple(8)
                 suppress_reply()
                 return "已切换 CCH 曲目" if ok else f"CCH 切歌失败：{detail}"
-            # stop：撤票据 + pause 收尾（原厂 DIRECT_STOP 语义无外部通道，pause 可靠）
+            # stop：旧票逐条撤（spec 裁决 4「换代旧票逐条 /managed/command stop」，
+            # 不依赖 NewEpoch）+ pause 收尾（原厂 DIRECT_STOP 语义无外部通道，pause 可靠）
             cur = _cch_state.get("items") or []
-            entry = cur[_cch_state["entry"]].get("id", "") if cur else ""
-            try:
-                await revoke(_CCH_SESSION, _CCH_EPOCH, entry)
-            except Exception as exc:  # noqa: BLE001 - 撤票失败不阻塞响应
-                logger.warning(f"[SongRequest] cch revoke err: {type(exc).__name__}")
+            for i, it in enumerate(cur):
+                entry_id = str(it.get("id") or f"cch-{i}")
+                try:
+                    await revoke(_CCH_SESSION, _CCH_EPOCH, entry_id)
+                except Exception as exc:  # noqa: BLE001 - 撤票失败不阻塞响应（30min TTL 兜底）
+                    logger.warning(f"[SongRequest] cch revoke({entry_id}) err: {type(exc).__name__}")
             await cast_native_simple(3)
             _cch_state.update({"entry": 0, "items": []})
             suppress_reply()

@@ -281,3 +281,26 @@ async def cast_native_simple(command: int) -> tuple[bool, str]:
             ok = 200 <= resp.status < 300
             logger.info(f"[CchCast] /cmd c={command} http={resp.status} ok={ok}", module="CchCast")
             return ok, f"http {resp.status}"
+
+
+async def speak(text: str) -> tuple[bool, str]:
+    """9102 /speak 原厂 TTS 播报（票 04 下行面）。
+
+    原厂把正在播的 kwqq suspend（STATE 15）；恢复编排归 cch_np.speak_with_resume
+    （桥内定时器，非轮询）。日志只记文本长度不记内容（播报文案可能含个人信息）。
+    """
+    import aiohttp
+
+    token = tts_token()
+    if not token:
+        return False, "tts token not configured"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            f"{tts_base()}/speak", json={"text": text, "is_open_mic": False},
+            headers=headers,
+        ) as resp:
+            ok = 200 <= resp.status < 300
+            logger.info(f"[CchCast] /speak http={resp.status} len={len(text or '')} ok={ok}",
+                        module="CchCast")
+            return ok, f"http {resp.status}"

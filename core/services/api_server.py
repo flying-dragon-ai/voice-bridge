@@ -577,6 +577,7 @@ class APIServer:
         self.app.router.add_get("/api/inject", self.handle_inject_status)
         self.app.router.add_post("/api/external/text", self.handle_external_text)  # 外部 ASR 文本入口（B-37）
         self.app.router.add_post("/api/external/np", self.handle_external_np)  # CCH 音乐事件（票 03 编排面）
+        self.app.router.add_post("/api/cch/collect", self.handle_cch_collect)  # CCH 收藏幂等（票 13）
         self.app.router.add_post("/api/inject/stream", self.inject_relay.handle_upstream)  # PC 上行 PCM
         self.app.router.add_get("/api/inject/relay", self.inject_relay.handle_health)  # 中继观测
         self.app.router.add_get("/api/inject/text", self.inject_relay.handle_ws_text)  # 文本回传 WS
@@ -1597,8 +1598,8 @@ class APIServer:
             from core.music import cch_np
 
             if not np_gate():
-                # 双关：只记录不编排（与 cast_enabled=False 语义一致）
-                cch_np.snapshot()
+                # 双关：只记录不编排（META/isFavorite 仍进内存——票 13 收藏幂等的读态源）
+                cch_np.record_event(kind, extras, device_ts)
                 logger.info(f"[APIServer] /api/external/np 记录（编排关闭）caller={caller}")
                 return web.json_response({"success": True, "action": "recorded_only"})
             action = await cch_np.on_np_event(kind, extras, device_ts)
@@ -1610,6 +1611,49 @@ class APIServer:
                 {"success": False, "code": "np_orchestration_error",
                  "error": type(exc).__name__}, status=500,
             )
+
+    async def handle_cch_collect(self, request: web.Request) -> web.Response:
+        """POST /api/cch/collect —— CCH 收藏幂等（票 13 服务端收尾，2026-11-20）。
+
+        body = {"collect": bool}；幂等判定在 cch_np.collect_favorite：
+        读 np 直报数据面的 isFavorite（worker 双写，编排关闭时也记录），
+        已一致 → noop 不发 tap；态未知 → 409（不盲发翻转）；不一致 → COMMAND 9 tap。
+        写类 Bearer 由 `api_auth_middleware` 先行（proxy 转发用 BRIDGE_TOKEN 同源）。
+        """
+        caller = self._caller_tag(request)
+        try:
+            n = int(request.headers.get("Content-Length") or 0)
+            if n <= 0 or n > 512:
+                raise ValueError("bad size")
+            body = json.loads(await request.read())
+            intent = body.get("collect")
+            if not isinstance(intent, bool):
+                raise ValueError("collect must be boolean")
+        except Exception:
+            return web.json_response(
+                {"success": False, "code": "collect_bad_payload",
+                 "error": "载荷非法：{\"collect\": true|false}"}, status=400)
+        try:
+            from core.music import cch_np
+
+            result = await cch_np.collect_favorite(intent)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[APIServer] /api/cch/collect 异常: {type(exc).__name__}: {exc}")
+            return web.json_response(
+                {"success": False, "code": "collect_error",
+                 "error": type(exc).__name__}, status=500)
+        action = result.get("action")
+        logger.info(f"[APIServer] /api/cch/collect action={action} caller={caller}")
+        if action == "unknown_state":
+            return web.json_response(
+                {"success": False, "code": "favorite_state_unknown",
+                 "error": "收藏态未知（数据面未同步 isFavorite），拒绝盲发翻转"}, status=409)
+        if action == "tap_failed":
+            return web.json_response(
+                {"success": False, "code": "tap_failed",
+                 "detail": result.get("detail", "")}, status=502)
+        return web.json_response({"success": True, "action": action,
+                                  "favorite": result.get("favorite")})
 
     async def handle_livez(self, request: web.Request) -> web.Response:
         """GET /livez —— 进程存活（不看设备；不走 /api/* 鉴权）。"""
