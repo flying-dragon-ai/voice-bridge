@@ -159,10 +159,24 @@ async def _command_locked(kind: str, **payload) -> str:
         service.observe(receipt.receipt_id, state="failed", detail=str(exc)[:160])
         return f"托管命令未能执行（{kind}）：{exc}"
     if kind == "stop":
+        from core.utils.logger import logger
         from core.music import focus_bridge
 
         await focus_bridge.force_release()
-        await runtime.player.stop_backend()
+        try:
+            await runtime.player.stop_backend()
+        except Exception as exc:
+            logger.warning(f"[SongBridge] backend stop failed (non-LX06 target?): {exc}")
+        # v0.4.6：CCH target 的 M5 播放必须单独停——hostcmd stop = 停借句柄会话
+        # + 清宿主 self-heal 状态（backends.py 的 stop 链不覆盖 CCH，2026-11-21
+        # 真机实测「已停止播放」但内核继续出声）。
+        if target() == "cch":
+            try:
+                from core.music.cch_cast import host_cmd
+
+                await host_cmd("stop")
+            except Exception as exc:
+                logger.warning(f"[SongBridge] CCH hostcmd stop failed: {exc}")
         await runtime.stop()
         runtime.bind(None)
     return f"托管命令已受理（{kind}, {receipt.state}）"

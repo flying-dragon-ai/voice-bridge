@@ -444,8 +444,15 @@ class ExternalConversationController:
         for kw in self.exit_keywords:
             if kw in text:
                 logger.info(f"Exit keyword: {kw}", module=self.LOG_MODULE)
-                # TurnTrace（ticket 11）：退出轮没有 LLM/TTS，立即收尾为 incomplete。
                 turn_trace.abandon_turn()
+                # v0.4.6：退出时同步停 CCH 播放并清宿主自愈状态——「退下」的合法停止
+                # 不能被 M5 self-heal 当冻结重新拉起（2026-11-21 真机：退下后歌曲被
+                # self-heal 反复拉回，反复多次无法退出）。
+                try:
+                    from core.music.cch_cast import host_cmd
+                    await host_cmd("stop")
+                except Exception as exc:
+                    logger.warning(f"Exit stop CCH playback failed: {exc}", module=self.LOG_MODULE)
                 return "exit"
 
         # 3.4 对话轮内媒体命令：「继续播放/暂停/停止播放/下一首/上一首」

@@ -1130,6 +1130,13 @@ async def _do_stop() -> str:
     if speaker is None:
         return "音箱服务还没就绪"
     await speaker.stop_device_audio()
+    # v0.4.6：CCH M5 播放也停——hostcmd stop = 停借句柄会话 + 清宿主 self-heal 状态
+    # （「退下/停止播放」不再被 self-heal 拉回，2026-11-21 真机对抗实测）
+    try:
+        from core.music.cch_cast import host_cmd
+        await host_cmd("stop")
+    except Exception as exc:
+        logger.warning(f"[SongRequest] CCH hostcmd stop failed: {exc}")
     cancel_pending_resume()
     _cancel_advance()
     _generation += 1  # 作废正在等待播完的续播监听
