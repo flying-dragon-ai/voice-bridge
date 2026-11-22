@@ -129,7 +129,8 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `API_SERVER_HOST`    | API 监听地址    | `127.0.0.1`   |
 | `API_SERVER_PORT`    | API 监听端口    | `9092`        |
 | `OPEN_XIAOAI_TOKEN`  | Client 鉴权 token（必填），未配置时服务端拒绝所有 Client 连接（fail closed） | 必填 |
-| `BRIDGE_API_TOKEN`   | 业务 API token（写类端点必带 `Authorization: Bearer`）；未配置时写类端点 503、读类/健康检查仍可用 | 未配置（写类失败关闭） |
+| `BRIDGE_API_TOKENS` | 具名业务凭证，格式 `label:token,label:token` | 未配置 |
+| `BRIDGE_API_TOKEN` | 兼容的单一业务凭证，可与具名集合并用 | 未配置 |
 | `ADMIN_TOKEN`        | 后台管理面板 token（与业务 token 分离） | 未配置（面板 API 全拒） |
 | `INJECT_ENABLE`      | PC 语音注入开关（可选）：留空=关闭；1/true/yes/on=开启并监听 :9093 | 关闭 |
 | `CONFIG_PATH`        | 自定义配置文件路径   | `./config.py` |
@@ -338,13 +339,11 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 
 业务 API 与后台面板使用**两套独立 token**：
 
-- 配置 `BRIDGE_API_TOKEN` 后，写类端点（`/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/external/text`、`/api/tts/doubao`）必须带 `Authorization: Bearer <BRIDGE_API_TOKEN>`：缺失/格式错误返回 401，token 不匹配返回 403。
-- **未配置 `BRIDGE_API_TOKEN` 时写类端点失败关闭（503 + 配置提示）**；`/api/health`、`/api/status`、`GET /api/inject`、`/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取（不返回凭证）。
-- 管理面板继续只用 `ADMIN_TOKEN`，与 `BRIDGE_API_TOKEN` 互不回退。
-- 日志只记录调用方与错误码，不打印 token 明文。
-- `GET /api/health?probe=1` 是例外：它会触发 3 条设备 RPC，配置 `BRIDGE_API_TOKEN` 时必须带 Bearer；未配置 token 时 probe 503（健康读本身仍可用）。
-
-升级顺序：先给所有调用方（HA、企业微信、脚本）配好 `Authorization: Bearer`，再在服务端设置 `BRIDGE_API_TOKEN`（设置即强制）。
+- 业务服务通过 `BRIDGE_API_TOKENS` 接受多个具名凭证，也接受单值 `BRIDGE_API_TOKEN`。具名条目的 `label` 为 1–32 个小写字母、数字或连字符，token 为 32–128 个字母、数字或 `._~-`。两种配置同时使用时，重复 label 或 token 会使整个配置无效。
+- 写类请求与未列入只读白名单的请求必须携带 `Authorization: Bearer <token>`。具名条目的 `label:` 留在服务端配置中。缺失或格式错误返回 401，token 不匹配返回 403。
+- 两个业务凭证变量均未配置时，受保护请求返回 503。`GET /api/health`、`GET /api/status`、`GET /api/inject`、`GET /api/inject/relay`、`GET /api/tts/doubao_voices` 可无鉴权读取。
+- 管理面板使用独立的 `ADMIN_TOKEN`。
+- `GET /api/health?probe=1` 会触发设备 RPC，需要业务 Bearer token。未配置业务凭证时，probe 返回 503。
 
 ### 🖥️ 后台管理面板
 
@@ -364,29 +363,35 @@ curl -X PUT http://localhost:9092/api/admin/config \
 ### 💡 使用示例
 
 ```bash
-# 注意：设置了 BRIDGE_API_TOKEN 后，所有写类请求都要加 -H "Authorization: Bearer $BRIDGE_API_TOKEN"
+# 设置与服务端一致的业务 token。使用具名凭证时只填写 token 部分。
+export BRIDGE_API_TOKEN="<your-business-token>"
 
 # 播放文字
 curl -X POST http://localhost:9092/api/play/text \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"text": "你好，我是小爱同学"}'
+  -d '{"text": "你好，欢迎使用语音桥。"}'
 
 # 播放音频链接
 curl -X POST http://localhost:9092/api/play/url \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/audio.mp3"}'
 
 # 上传音频文件
 curl -X POST http://localhost:9092/api/play/file \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -F "file=@/path/to/audio.mp3"
 
 # 豆包 TTS（可指定音色）
 curl -X POST http://localhost:9092/api/tts/doubao \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"text": "你好", "speaker_id": "zh_female_cancan_mars_bigtts"}'
 
 # 打断播放
-curl -X POST http://localhost:9092/api/interrupt
+curl -X POST http://localhost:9092/api/interrupt \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN"
 ```
 
 ***
