@@ -1,22 +1,18 @@
 <div align="center">
 
-# Open-XiaoAI Bridge
+# Voice Bridge
 
-[![Python](https://img.shields.io/badge/Python-3.12+-3776ab?logo=python&logoColor=white)](https://www.python.org/) [![Rust](https://img.shields.io/badge/Rust-native_module-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE) [![GitHub Stars](https://img.shields.io/github/stars/coderzc/open-xiaoai-bridge?style=flat&logo=github)](https://github.com/coderzc/open-xiaoai-bridge/stargazers) [![Docker Image](https://img.shields.io/badge/ghcr.io-open--xiaoai--bridge-2496ed?logo=docker&logoColor=white)](https://ghcr.io/coderzc/open-xiaoai-bridge)
+**连接小爱音箱与外部 AI 服务的语音桥接器**
 
-[![New](https://img.shields.io/badge/🎉_新功能-OpenClaw_支持_自定义唤醒词_|_连续对话_|_多_Agent_路由_|_克隆音色_|_流式播放-f97316)](https://github.com/coderzc/open-xiaoai-bridge/releases)
+[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/) [![Rust](https://img.shields.io/badge/Rust-PyO3-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/License-MIT-2E7D32)](LICENSE)
 
-**小爱音箱与外部 AI 服务（小智 AI、OpenClaw、OpenAI 兼容服务、QwenPaw）的桥接器**
-
-打破小爱音箱的封闭生态，灵活接入多种 AI 服务，提供 HTTP API 实现远程控制。
-
-[📺 演示 ①](https://www.bilibili.com/video/BV1DHcBz1Ex7) · [📺 演示 ②](https://www.bilibili.com/video/BV1UQQSBHEvg)
-
-[📖 快速开始](#-快速开始) · [🔊 TTS 配置](#-tts-配置) · [🔌 OpenAI 兼容服务](#-openai-兼容服务) · [🐾 QwenPaw 集成](#-qwenpaw-集成) · [🦞 OpenClaw 集成](#-openclaw-集成) · [🔧 API 文档](#-api-server) · [🐛 常见问题](#-常见问题)
-
-> 本项目受 [Open-XiaoAI](https://github.com/idootop/open-xiaoai) 启发，并参考其 `examples/xiaozhi/` 示例演进而来，现已作为独立项目持续维护。
+[功能](#-功能一览) · [仓库结构](#仓库结构) · [快速开始](#-快速开始) · [系统架构](#-系统架构) · [API](#-api-server) · [常见问题](#-常见问题)
 
 </div>
+
+本仓库是 `jndavidz/open-xiaoai-bridge` 的 fork。Python 服务管理音箱设备、语音处理与 AI 后端，Rust 扩展负责音箱 Client 的连接和音频处理。安装音箱端 Client 后，可通过设备交互或 HTTP API 使用桥接服务。 [上游仓库](https://github.com/jndavidz/open-xiaoai-bridge)
+
+[演示 ①](https://www.bilibili.com/video/BV1DHcBz1Ex7) · [演示 ②](https://www.bilibili.com/video/BV1UQQSBHEvg)
 
 ***
 
@@ -34,6 +30,23 @@
 | ⚡ **VAD + KWS**    | 语音活动检测前置，减少无效识别，更省电                                                            |
 | 🌐 **HTTP API**    | 远程播放文字/音频、控制音箱                                                                 |
 | 🧩 **模块化**         | 各功能独立开关，按需启用                                                                   |
+
+## 仓库结构
+
+| 路径 | 职责 |
+| --- | --- |
+| [`main.py`](main.py)、[`config.py`](config.py) | 服务入口与默认配置 |
+| [`core/`](core/) | 设备接入、音频服务、指令、对话与后端集成 |
+| [`native/`](native/) | Rust / PyO3 扩展与音箱 Client 的 WebSocket 服务 |
+| [`tests/`](tests/) | Python 单元测试与契约测试 |
+| [`deploy/`](deploy/) | 部署配置、运维脚本与部署说明 |
+| [`docs/`](docs/) | 设备 Client、服务接口和开发资料 |
+| [`scripts/`](scripts/) | 服务启动、语音克隆和 TTS 辅助脚本 |
+| [`skills/xiaoai-tts/`](skills/xiaoai-tts/) | 通过桥接 API 控制播报的 Agent skill |
+| [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml) | 镜像构建与容器运行配置 |
+| [`pyproject.toml`](pyproject.toml)、[`uv.lock`](uv.lock) | Python 依赖、构建后端与锁文件 |
+
+服务接收音箱 Client 的音频和设备事件，通过 `core/` 中的服务及后端处理请求。HTTP API、TTS 和外部 AI 连接可按配置启用。模块关系与流程见下文的 [系统架构](#-系统架构)。
 
 ***
 
@@ -60,7 +73,7 @@
 
 ### 🐳 Docker Compose（推荐）
 
-模型文件解压到 `./models` 目录，然后下载配置并启动：
+将模型文件解压到 `./models` 目录，再下载配置并启动。示例使用上游发布的镜像与配置。
 
 ```bash
 # 下载配置文件
@@ -87,11 +100,11 @@ volumes:
 
 ### 💻 本地编译
 
-模型文件解压到 `core/models/` 目录，然后克隆仓库并启动：
+克隆仓库后，将模型文件解压到 `core/models/`，再启动服务。
 
 ```bash
-git clone https://github.com/coderzc/open-xiaoai-bridge.git
-cd open-xiaoai-bridge
+git clone https://github.com/flying-dragon-ai/voice-bridge.git
+cd voice-bridge
 
 # 依赖: uv, Rust
 # Linux 还需要: pkg-config, patchelf
@@ -116,7 +129,8 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `API_SERVER_HOST`    | API 监听地址    | `127.0.0.1`   |
 | `API_SERVER_PORT`    | API 监听端口    | `9092`        |
 | `OPEN_XIAOAI_TOKEN`  | Client 鉴权 token（必填），未配置时服务端拒绝所有 Client 连接（fail closed） | 必填 |
-| `BRIDGE_API_TOKEN`   | 业务 API token（写类端点必带 `Authorization: Bearer`）；未配置时写类端点 503、读类/健康检查仍可用 | 未配置（写类失败关闭） |
+| `BRIDGE_API_TOKENS` | 具名业务凭证，格式 `label:token,label:token` | 未配置 |
+| `BRIDGE_API_TOKEN` | 兼容的单一业务凭证，可与具名集合并用 | 未配置 |
 | `ADMIN_TOKEN`        | 后台管理面板 token（与业务 token 分离） | 未配置（面板 API 全拒） |
 | `INJECT_ENABLE`      | PC 语音注入开关（可选）：留空=关闭；1/true/yes/on=开启并监听 :9093 | 关闭 |
 | `CONFIG_PATH`        | 自定义配置文件路径   | `./config.py` |
@@ -325,13 +339,11 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 
 业务 API 与后台面板使用**两套独立 token**：
 
-- 配置 `BRIDGE_API_TOKEN` 后，写类端点（`/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/external/text`、`/api/tts/doubao`）必须带 `Authorization: Bearer <BRIDGE_API_TOKEN>`：缺失/格式错误返回 401，token 不匹配返回 403。
-- **未配置 `BRIDGE_API_TOKEN` 时写类端点失败关闭（503 + 配置提示）**；`/api/health`、`/api/status`、`GET /api/inject`、`/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取（不返回凭证）。
-- 管理面板继续只用 `ADMIN_TOKEN`，与 `BRIDGE_API_TOKEN` 互不回退。
-- 日志只记录调用方与错误码，不打印 token 明文。
-- `GET /api/health?probe=1` 是例外：它会触发 3 条设备 RPC，配置 `BRIDGE_API_TOKEN` 时必须带 Bearer；未配置 token 时 probe 503（健康读本身仍可用）。
-
-升级顺序：先给所有调用方（HA、企业微信、脚本）配好 `Authorization: Bearer`，再在服务端设置 `BRIDGE_API_TOKEN`（设置即强制）。
+- 业务服务通过 `BRIDGE_API_TOKENS` 接受多个具名凭证，也接受单值 `BRIDGE_API_TOKEN`。具名条目的 `label` 为 1–32 个小写字母、数字或连字符，token 为 32–128 个字母、数字或 `._~-`。两种配置同时使用时，重复 label 或 token 会使整个配置无效。
+- 写类请求与未列入只读白名单的请求必须携带 `Authorization: Bearer <token>`。具名条目的 `label:` 留在服务端配置中。缺失或格式错误返回 401，token 不匹配返回 403。
+- 两个业务凭证变量均未配置时，受保护请求返回 503。`GET /api/health`、`GET /api/status`、`GET /api/inject`、`GET /api/inject/relay`、`GET /api/tts/doubao_voices` 可无鉴权读取。
+- 管理面板使用独立的 `ADMIN_TOKEN`。
+- `GET /api/health?probe=1` 会触发设备 RPC，需要业务 Bearer token。未配置业务凭证时，probe 返回 503。
 
 ### 🖥️ 后台管理面板
 
@@ -351,29 +363,35 @@ curl -X PUT http://localhost:9092/api/admin/config \
 ### 💡 使用示例
 
 ```bash
-# 注意：设置了 BRIDGE_API_TOKEN 后，所有写类请求都要加 -H "Authorization: Bearer $BRIDGE_API_TOKEN"
+# 设置与服务端一致的业务 token。使用具名凭证时只填写 token 部分。
+export BRIDGE_API_TOKEN="<your-business-token>"
 
 # 播放文字
 curl -X POST http://localhost:9092/api/play/text \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"text": "你好，我是小爱同学"}'
+  -d '{"text": "你好，欢迎使用语音桥。"}'
 
 # 播放音频链接
 curl -X POST http://localhost:9092/api/play/url \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/audio.mp3"}'
 
 # 上传音频文件
 curl -X POST http://localhost:9092/api/play/file \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -F "file=@/path/to/audio.mp3"
 
 # 豆包 TTS（可指定音色）
 curl -X POST http://localhost:9092/api/tts/doubao \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"text": "你好", "speaker_id": "zh_female_cancan_mars_bigtts"}'
 
 # 打断播放
-curl -X POST http://localhost:9092/api/interrupt
+curl -X POST http://localhost:9092/api/interrupt \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN"
 ```
 
 ***
@@ -1214,7 +1232,7 @@ APP_CONFIG = {
    4. **重要**：确保复刻音色与 `tts.doubao.app_id` 属于**同一个火山引擎项目**，否则无法使用。
 3. **如何将指定文本转成特定音色的音频文件？**
 
-   可以使用脚本 [scripts/generate\_tts.py](/Users/zc/projects/open-xiaoai-bridge/scripts/generate_tts.py)：
+   可以使用脚本 [scripts/generate\_tts.py](scripts/generate_tts.py)：
    ```bash
    python3 scripts/generate_tts.py \
      --speaker-id zh_male_lengkugege_emo_v2_mars_bigtts \
